@@ -34,6 +34,8 @@ import type {
 } from '../types.ts'
 import { nextRecordId, rejected, success } from './common.ts'
 import type { ServiceState } from './common.ts'
+import { cancelSlurm, configurationHash, parseParameters, probeSlurm, slurmLogs, SlurmSubmissionError, submitSlurm } from './slurm.ts'
+import type { Parameters } from './slurm.ts'
 
 /** Everything the Server domain functions need from the service scope. */
 export interface ServerDeps {
@@ -62,6 +64,7 @@ const NVIDIA_SMI_QUERY = 'nvidia-smi --query-gpu=name,utilization.gpu,memory.use
 
 /** Hard cap of one submitted command line (the durable record stores it verbatim). */
 const JOB_COMMAND_MAX_CHARS = 4000
+const SLURM_SCRIPT_MAX_CHARS = 32_768
 /**
  * Kill timeout of one remote job's ssh session. Hitting it settles the job
  * `unknown` (#225): the session is dropped, so the remote outcome — including
@@ -371,10 +374,13 @@ export async function recoverInterruptedJobs(deps: ServerDeps): Promise<void> {
   const now = new Date().toISOString()
   for (const [, job] of jobs.entries()) {
     if (!isActiveJobStatus(job.status)) continue
+    if (job.mode === 'slurm' && job.slurmJobId !== undefined) continue
     const recovered: JobRecord = {
       ...job,
-      status: 'interrupted',
-      stderrTail: 'host restarted before the job outcome was known',
+      status: job.mode === 'slurm' ? 'unknown' : 'interrupted',
+      stderrTail: job.mode === 'slurm'
+        ? 'host restarted during Slurm submission; inspect the remote directory before retrying'
+        : 'host restarted before the job outcome was known',
       finishedAt: now,
     }
     await jobs.put(job.id, recovered)
@@ -411,6 +417,8 @@ export async function submitJob(
     serverId: string
     command: string
     experimentId?: string | undefined
+    mode?: 'ssh' | 'slurm' | undefined
+    parametersJson?: string | undefined
   },
 ): Promise<ResearchSubmitJobResult> {
   const server = deps.domain.table('servers').get(request.serverId)
@@ -419,8 +427,21 @@ export async function submitJob(
   }
   const command = request.command.trim()
   if (command === '') return rejected({ code: 'invalid-input', message: 'command must be non-empty' })
-  if (command.length > JOB_COMMAND_MAX_CHARS) {
-    return rejected({ code: 'invalid-input', message: `command must be at most ${String(JOB_COMMAND_MAX_CHARS)} characters` })
+  const commandLimit = request.mode === 'slurm' ? SLURM_SCRIPT_MAX_CHARS : JOB_COMMAND_MAX_CHARS
+  if (command.length > commandLimit) {
+    return rejected({ code: 'invalid-input', message: `command must be at most ${String(commandLimit)} characters` })
+  }
+  if (request.mode !== undefined && request.mode !== 'ssh' && request.mode !== 'slurm') {
+    return rejected({ code: 'invalid-input', message: 'mode must be ssh or slurm' })
+  }
+  let parameters: Parameters = {}
+  if (request.mode === 'slurm') {
+    try { parameters = parseParameters(request.parametersJson) }
+    catch (error) {
+      return rejected({ code: 'invalid-input', message: error instanceof Error ? error.message : 'invalid parameters JSON' })
+    }
+  } else if (request.parametersJson !== undefined && request.parametersJson.trim() !== '') {
+    return rejected({ code: 'invalid-input', message: 'parameters JSON requires Slurm mode' })
   }
   if (server.username === '') {
     return rejected({ code: 'invalid-input', message: `server ${server.name} has no ssh login user` })
@@ -430,8 +451,10 @@ export async function submitJob(
     return rejected({ code: 'experiment-not-found', id: request.experimentId })
   }
   state.jobSeq += 1
+  const jobId = `job-${Date.now().toString(36)}-${String(state.jobSeq)}`
   const job: JobRecord = {
-    id: `job-${Date.now().toString(36)}-${String(state.jobSeq)}`,
+    id: jobId,
+    ...(request.mode === 'slurm' ? { mode: 'slurm' as const } : {}),
     serverId: server.id,
     command,
     status: 'queued',
@@ -442,6 +465,10 @@ export async function submitJob(
     stdoutTail: '',
     stderrTail: '',
     createdAt: new Date().toISOString(),
+    ...(request.mode === 'slurm' ? {
+      remoteDir: `~/.mimir/jobs/${jobId}`,
+      configHash: configurationHash(command, parameters),
+    } : {}),
   }
   await deps.domain.table('jobs').put(job.id, job)
   if (request.experimentId !== undefined) {
@@ -458,9 +485,13 @@ export async function submitJob(
     payload: { command: command.slice(0, 200) },
   })
   // Register ownership before yielding so deletion can cancel the queued race.
-  const abort = new AbortController()
-  state.jobAborts.set(job.id, abort)
-  void runJob(deps, state, job.id, abort.signal)
+  if (job.mode === 'slurm') {
+    void runSlurmSubmission(deps, state, job.id, parameters)
+  } else {
+    const abort = new AbortController()
+    state.jobAborts.set(job.id, abort)
+    void runJob(deps, state, job.id, abort.signal)
+  }
   return success({ job })
 }
 
@@ -472,19 +503,25 @@ export async function submitJob(
  * @param request - the optional server filter.
  * @returns the job rows.
  */
-export function listJobs(
+export async function listJobs(
   deps: ServerDeps,
+  state: ServiceState,
   request: { serverId?: string },
 ): Promise<ResearchListJobsResult> {
   if (request.serverId !== undefined
     && deps.domain.table('servers').get(request.serverId) === undefined) {
-    return Promise.resolve(rejected({ code: 'server-not-found', id: request.serverId }))
+    return rejected({ code: 'server-not-found', id: request.serverId })
   }
+  await Promise.all([...deps.domain.table('jobs').entries()]
+    .map(([, job]) => job)
+    .filter(job => job.mode === 'slurm' && job.slurmJobId !== undefined && isActiveJobStatus(job.status)
+      && (request.serverId === undefined || job.serverId === request.serverId))
+    .map(job => refreshSlurmJob(deps, state, job)))
   const jobs = [...deps.domain.table('jobs').entries()]
     .map(([, record]) => record)
     .filter(record => request.serverId === undefined || record.serverId === request.serverId)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-  return Promise.resolve(success({ jobs: Object.freeze(jobs) }))
+  return success({ jobs: Object.freeze(jobs) })
 }
 
 /**
@@ -506,6 +543,20 @@ export async function deleteJob(
   if (existing === undefined) {
     return rejected({ code: 'job-not-found', id: request.id })
   }
+  if (existing.mode === 'slurm' && isActiveJobStatus(existing.status)) {
+    if (existing.slurmJobId === undefined) {
+      return rejected({ code: 'invalid-input', message: 'Slurm submission is still in progress; retry cancellation once its job id appears' })
+    }
+    const server = deps.domain.table('servers').get(existing.serverId)
+    if (server === undefined) return rejected({ code: 'server-not-found', id: existing.serverId })
+    try {
+      await cancelSlurm(server, existing)
+      await table.put(existing.id, { ...existing, statusNote: 'scancel requested; awaiting scheduler confirmation' })
+      return success({ id: existing.id })
+    } catch (error) {
+      return rejected({ code: 'invalid-input', message: `scancel failed: ${error instanceof Error ? error.message : String(error)}` })
+    }
+  }
   const abort = state.jobAborts.get(request.id)
   if (abort !== undefined && isActiveJobStatus(existing.status)) {
     // Deleting an active row is a cancel request: the local SSH session is
@@ -518,6 +569,85 @@ export async function deleteJob(
   }
   await table.delete(request.id)
   return success({ id: request.id })
+}
+
+/** Background stage and sbatch handshake; the durable record carries errors. */
+async function runSlurmSubmission(deps: ServerDeps, state: ServiceState, id: string, parameters: Parameters): Promise<void> {
+  const table = deps.domain.table('jobs')
+  const job = table.get(id)
+  if (job === undefined) return
+  const server = deps.domain.table('servers').get(job.serverId)
+  if (server === undefined) {
+    await finishJob(deps, state, { ...job, status: 'failed', stderrTail: 'server record deleted before Slurm submission', finishedAt: new Date().toISOString() })
+    return
+  }
+  try {
+    const slurmJobId = await submitSlurm(server, job, parameters)
+    const current = table.get(id)
+    if (current !== undefined && isActiveJobStatus(current.status)) {
+      await table.put(id, { ...current, slurmJobId, statusNote: `Slurm job ${slurmJobId} accepted` })
+    }
+  } catch (error) {
+    const current = table.get(id)
+    if (current === undefined || !isActiveJobStatus(current.status)) return
+    const uncertain = error instanceof SlurmSubmissionError && error.maybeSubmitted
+    await finishJob(deps, state, {
+      ...current,
+      status: uncertain ? 'unknown' : 'failed',
+      stderrTail: `${error instanceof Error ? error.message : String(error)}${uncertain ? '\nsbatch may have accepted the job; inspect the remote directory before retrying' : ''}`,
+      finishedAt: new Date().toISOString(),
+    })
+  }
+}
+
+const slurmRefreshes = new WeakMap<ResearchWikiDomain, Map<string, Promise<void>>>()
+
+/** Refresh one scheduler-owned job once even if panel and agent poll together. */
+function refreshSlurmJob(deps: ServerDeps, state: ServiceState, job: JobRecord): Promise<void> {
+  let pending = slurmRefreshes.get(deps.domain)
+  if (pending === undefined) {
+    pending = new Map()
+    slurmRefreshes.set(deps.domain, pending)
+  }
+  const existing = pending.get(job.id)
+  if (existing !== undefined) return existing
+  const inFlight = syncSlurmJob(deps, state, job).finally(() => { pending?.delete(job.id) })
+  pending.set(job.id, inFlight)
+  return inFlight
+}
+
+async function syncSlurmJob(deps: ServerDeps, state: ServiceState, job: JobRecord): Promise<void> {
+  const table = deps.domain.table('jobs')
+  const current = table.get(job.id)
+  if (current === undefined || !isActiveJobStatus(current.status)) return
+  const server = deps.domain.table('servers').get(job.serverId)
+  if (server === undefined) {
+    await table.put(job.id, { ...current, statusNote: 'server record missing; Slurm status cannot be checked' })
+    return
+  }
+  try {
+    const probe = await probeSlurm(server, current)
+    const latest = table.get(job.id)
+    if (latest === undefined || !isActiveJobStatus(latest.status)) return
+    let logs: { stdout: string; stderr: string } | undefined
+    try { logs = await slurmLogs(server, latest) }
+    catch { /* Scheduler state remains usable when log files are unavailable. */ }
+    const next: JobRecord = {
+      ...latest,
+      status: probe.status,
+      ...(probe.status === 'running' && latest.startedAt === undefined ? { startedAt: new Date().toISOString() } : {}),
+      ...(logs === undefined ? {} : { stdoutTail: tailOf(logs.stdout), stderrTail: tailOf(logs.stderr) }),
+      ...('note' in probe && probe.note !== undefined ? { statusNote: probe.note } : { statusNote: '' }),
+      ...('exitCode' in probe ? { exitCode: probe.exitCode, finishedAt: new Date().toISOString() } : {}),
+    }
+    if (isActiveJobStatus(next.status)) await table.put(job.id, next)
+    else await finishJob(deps, state, next)
+  } catch (error) {
+    const latest = table.get(job.id)
+    if (latest !== undefined && isActiveJobStatus(latest.status)) {
+      await table.put(job.id, { ...latest, statusNote: `Slurm status unavailable: ${error instanceof Error ? error.message : String(error)}` })
+    }
+  }
 }
 
 /**

@@ -95,7 +95,7 @@ export function ServersView({
   readonly experiments: ResearchProjectSlice<readonly ExperimentRecord[]> | null
   readonly ensureJobs: () => void
   readonly refreshJobs: () => void
-  readonly submitJob: (serverId: string, command: string, experimentId?: string) => Promise<ResearchFailureView | null>
+  readonly submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string) => Promise<ResearchFailureView | null>
   readonly deleteJob: (id: string) => Promise<ResearchFailureView | null>
   readonly t: ResearchT
 }) {

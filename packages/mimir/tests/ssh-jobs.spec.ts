@@ -8,7 +8,7 @@
  * the session-failure path) — no module mocks.
  */
 
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi, afterEach } from 'vitest'
@@ -20,6 +20,7 @@ import { researchWikiDomainSpec } from '../src/store.ts'
 import { recoverInterruptedJobs } from '../src/services/server.ts'
 import { isActiveJobStatus, isTerminalJobStatus, JOB_ACTIVE_STATUSES, JOB_STATUSES } from '../src/job-lifecycle.ts'
 import { ResearchService } from '../src/service.ts'
+import { configurationHash } from '../src/services/slurm.ts'
 import type { ExperimentRecord, JobRecord } from '../src/types.ts'
 
 /** Boot a service over a memory-backed domain and a fresh temp workspace. */
@@ -98,6 +99,135 @@ function isActiveJob(job: JobRecord): boolean {
 }
 
 afterEach(() => { vi.unstubAllEnvs() })
+
+/** Scheduler simulation that exercises actual child processes and staging files. */
+async function stubFakeSlurm(): Promise<{ stateFile: string; uploadDir: string }> {
+  const binDir = await mkdtemp(join(tmpdir(), 'mimir-fake-slurm-'))
+  const uploadDir = join(binDir, 'uploaded')
+  const stateFile = join(binDir, 'state')
+  await mkdir(uploadDir)
+  await writeFile(stateFile, 'PENDING')
+  const ssh = [
+    '#!/bin/bash',
+    'while [ $# -gt 1 ]; do shift; done',
+    'command=$1',
+    'state=$(cat "$MIMIR_FAKE_SLURM_STATE")',
+    'case "$command" in',
+    '  sbatch*)',
+    '    case "$state" in',
+    '      SUBMIT_LOST) echo "connection lost after send" >&2; exit 255 ;;',
+    '      REJECT) echo "invalid partition" >&2; exit 2 ;;',
+    '    esac',
+    '    echo "4242" ;;',
+    '  squeue*)',
+    '    case "$state" in',
+    '      ERROR) echo "scheduler unavailable" >&2; exit 255 ;;',
+    '      PENDING|RUNNING) echo "$state" ;;',
+    '    esac ;;',
+    '  sacct*) echo "4242|$state|0:0" ;;',
+    '  scancel*) echo "CANCELLED" > "$MIMIR_FAKE_SLURM_STATE" ;;',
+    '  *stdout.log*) echo "result saved" ;;',
+    '  *stderr.log*) : ;;',
+    'esac',
+    '',
+  ].join('\n')
+  const scp = [
+    '#!/bin/bash',
+    'for arg in "$@"; do',
+    '  case "$arg" in',
+    '    */job.sh|*/parameters.json|*/manifest.json) cp "$arg" "$MIMIR_FAKE_SLURM_UPLOAD/" ;;',
+    '  esac',
+    'done',
+    '',
+  ].join('\n')
+  await writeFile(join(binDir, 'ssh'), ssh)
+  await writeFile(join(binDir, 'scp'), scp)
+  await chmod(join(binDir, 'ssh'), 0o755)
+  await chmod(join(binDir, 'scp'), 0o755)
+  vi.stubEnv('MIMIR_FAKE_SLURM_STATE', stateFile)
+  vi.stubEnv('MIMIR_FAKE_SLURM_UPLOAD', uploadDir)
+  vi.stubEnv('PATH', `${binDir}:${process.env.PATH ?? ''}`)
+  return { stateFile, uploadDir }
+}
+
+async function waitForSlurmId(service: ResearchService, id: string): Promise<JobRecord> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const listed = await service.listJobs({})
+    if (listed.ok) {
+      const job = listed.value.jobs.find(record => record.id === id)
+      if (job?.slurmJobId !== undefined) return job
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error('Slurm submission did not return an id')
+}
+
+describe('Slurm job integration', () => {
+  it('stages script and canonical parameters, survives recovery, and writes back only after scheduler completion', async () => {
+    const { stateFile, uploadDir } = await stubFakeSlurm()
+    const { service, domain, workspaceDir } = await harness()
+    const saved = await service.saveServer({ server: SERVER_INPUT })
+    if (!saved.ok) throw new Error('server setup failed')
+    await domain.table('experiments').put(EXPERIMENT.id, EXPERIMENT)
+    const script = '#!/bin/bash\n#SBATCH --time=00:05:00\npython train.py parameters.json'
+    const submitted = await service.submitJob({
+      serverId: saved.value.server.id, command: script, mode: 'slurm',
+      parametersJson: '{"beta":2,"alpha":1}', experimentId: EXPERIMENT.id,
+    })
+    if (!submitted.ok) throw new Error('submit failed')
+    const id = submitted.value.job.id
+    const pending = await waitForSlurmId(service, id)
+    expect(pending).toMatchObject({ mode: 'slurm', slurmJobId: '4242', status: 'queued' })
+    expect(pending.configHash).toBe(configurationHash(script, { alpha: 1, beta: 2 }))
+    expect(JSON.parse(await readFile(join(uploadDir, 'parameters.json'), 'utf8'))).toEqual({ alpha: 1, beta: 2 })
+    expect((await readFile(join(uploadDir, 'job.sh'), 'utf8'))).toContain('#SBATCH --time=00:05:00')
+    expect(JSON.parse(await readFile(join(uploadDir, 'manifest.json'), 'utf8')).configHash).toBe(pending.configHash)
+    await recoverInterruptedJobs({ domain, workspaceDir })
+    expect(domain.table('jobs').get(id)?.status).toBe('queued')
+    await writeFile(stateFile, 'RUNNING')
+    await service.listJobs({})
+    expect(domain.table('jobs').get(id)?.status).toBe('running')
+    await writeFile(stateFile, 'ERROR')
+    await service.listJobs({})
+    expect(domain.table('jobs').get(id)?.status).toBe('running')
+    expect(domain.table('jobs').get(id)?.statusNote).toContain('unavailable')
+    await writeFile(stateFile, 'COMPLETED')
+    const settled = await settleJob(service, id)
+    expect(settled).toMatchObject({ status: 'succeeded', exitCode: 0, stdoutTail: 'result saved\n' })
+    expect(domain.table('experiments').get(EXPERIMENT.id)?.status).toBe('success')
+  })
+
+  it('uses scancel and waits for scheduler confirmation', async () => {
+    await stubFakeSlurm()
+    const { service } = await harness()
+    const saved = await service.saveServer({ server: SERVER_INPUT })
+    if (!saved.ok) throw new Error('server setup failed')
+    const submitted = await service.submitJob({ serverId: saved.value.server.id, command: 'true', mode: 'slurm' })
+    if (!submitted.ok) throw new Error('submit failed')
+    const job = await waitForSlurmId(service, submitted.value.job.id)
+    await expect(service.deleteJob({ id: job.id })).resolves.toEqual({ ok: true, value: { id: job.id } })
+    const settled = await settleJob(service, job.id)
+    expect(settled.status).toBe('cancelled')
+  })
+
+  it('distinguishes an ambiguous sbatch transport loss from a definite rejection', async () => {
+    const { stateFile } = await stubFakeSlurm()
+    const { service } = await harness()
+    const saved = await service.saveServer({ server: SERVER_INPUT })
+    if (!saved.ok) throw new Error('server setup failed')
+    const serverId = saved.value.server.id
+    await expect(service.submitJob({ serverId, command: 'true', mode: 'slurm', parametersJson: '[]' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'invalid-input' } })
+    await writeFile(stateFile, 'SUBMIT_LOST')
+    const ambiguous = await service.submitJob({ serverId, command: 'true', mode: 'slurm' })
+    if (!ambiguous.ok) throw new Error('submit failed')
+    expect((await settleJob(service, ambiguous.value.job.id)).status).toBe('unknown')
+    await writeFile(stateFile, 'REJECT')
+    const rejected = await service.submitJob({ serverId, command: 'true', mode: 'slurm' })
+    if (!rejected.ok) throw new Error('submit failed')
+    expect((await settleJob(service, rejected.value.job.id)).status).toBe('failed')
+  })
+})
 
 describe('job lifecycle contract (#225)', () => {
   it('defines exactly the seven statuses, active vs terminal', () => {

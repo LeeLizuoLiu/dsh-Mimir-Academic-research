@@ -226,6 +226,16 @@ export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancell
 /** One remote command submitted to a remembered server over ssh. */
 export interface JobRecord {
   readonly id: string
+  /** Absent means the original foreground SSH runner. */
+  readonly mode?: 'slurm' | undefined
+  /** Slurm's durable scheduler id, once sbatch has acknowledged submission. */
+  readonly slurmJobId?: string | undefined
+  /** Per-submission directory on the remote host. */
+  readonly remoteDir?: string | undefined
+  /** SHA-256 of the canonical script and parameter JSON. */
+  readonly configHash?: string | undefined
+  /** A recoverable scheduler query or submission diagnostic. */
+  readonly statusNote?: string | undefined
   /** Remembered server the command runs on. */
   readonly serverId: string
   /** The remote command line, executed by the server's login shell. */

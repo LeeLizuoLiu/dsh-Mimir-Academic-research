@@ -121,10 +121,12 @@ export function createServerCheckTool(getResearch: ResearchServiceResolver): Too
 export function createServerSubmitJobTool(getResearch: ResearchServiceResolver): ToolDefinition {
   return defineTool({
     name: 'server_submit_job',
-    description: 'Queue one batch-mode ssh command on a remembered server (its login shell runs the command). Non-blocking: returns the queued job record (id, server_id, command, status "queued") once durable; poll server_list_jobs for the flips to running, then succeeded/failed. A non-empty command up to 4000 characters is required; the server must name an ssh login user; an optional experiment_id links the run and flips that experiment record to running on submit, then to success/failed when the job settles. Rejections (server-not-found, invalid-input, experiment-not-found) return as a failure, not an error.',
+    description: 'Submit a remote SSH command or Slurm batch script. Slurm mode stages job.sh, parameters.json and manifest.json in a unique remote directory, submits with sbatch, and records the scheduler id and configuration hash. Poll server_list_jobs for Slurm status and logs; optional experiment_id receives the settled outcome.',
     parameters: {
       server_id: { type: 'string', required: true, description: 'Id of a remembered ssh-capable server (see server_list).' },
-      command: { type: 'string', required: true, description: 'The remote command line, executed by the server\'s login shell; at most 4000 characters.' },
+      command: { type: 'string', required: true, description: 'SSH command (up to 4000 characters) or Slurm batch script (up to 32768 characters).' },
+      mode: { type: 'string', enum: ['ssh', 'slurm'], description: 'Default ssh; slurm treats command as a batch script.' },
+      parameters_json: { type: 'string', description: 'Slurm only: JSON object stored as parameters.json in the remote job directory and included in the configuration hash.' },
       experiment_id: { type: 'string', description: 'Optional wiki experiment record to link and write the settle outcome back to.' },
     },
     output: { schema: { type: 'json' }, render },
@@ -132,6 +134,8 @@ export function createServerSubmitJobTool(getResearch: ResearchServiceResolver):
       return asJson(await forward(() => requireService(getResearch).submitJob({
         serverId: args.server_id,
         command: args.command,
+        ...(args.mode === undefined ? {} : { mode: args.mode as 'ssh' | 'slurm' }),
+        ...(args.parameters_json === undefined ? {} : { parametersJson: args.parameters_json }),
         ...(args.experiment_id === undefined ? {} : { experimentId: args.experiment_id }),
       })))
     },

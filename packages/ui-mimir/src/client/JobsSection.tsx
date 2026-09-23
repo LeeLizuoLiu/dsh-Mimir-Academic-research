@@ -19,6 +19,7 @@ import css from './ResearchPanel.module.css'
 
 /** Poll cadence while any job is queued/running. */
 const JOB_POLL_INTERVAL_MS = 2000
+const SLURM_POLL_INTERVAL_MS = 15_000
 
 /** Whether one job still has a status flip coming (the polling condition). */
 function isActive(job: JobRecord): boolean {
@@ -39,13 +40,15 @@ export function JobsSection({
   readonly experiments: ResearchProjectSlice<readonly ExperimentRecord[]> | null
   readonly ensureJobs: () => void
   readonly refreshJobs: () => void
-  readonly submitJob: (serverId: string, command: string, experimentId?: string) => Promise<ResearchFailureView | null>
+  readonly submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string) => Promise<ResearchFailureView | null>
   readonly deleteJob: (id: string) => Promise<ResearchFailureView | null>
   readonly t: ResearchT
 }) {
   const [serverId, setServerId] = useState('')
   const [experimentId, setExperimentId] = useState('')
   const [command, setCommand] = useState('')
+  const [mode, setMode] = useState<'ssh' | 'slurm'>('ssh')
+  const [parametersJson, setParametersJson] = useState('{}')
   const [formError, setFormError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -55,7 +58,9 @@ export function JobsSection({
   // Poll only while a status flip is still coming; a settled list is static.
   useEffect(() => {
     if (jobs.status !== 'ready' || !jobs.list.some(isActive)) return
-    const timer = setInterval(refreshJobs, JOB_POLL_INTERVAL_MS)
+    const interval = jobs.list.some(job => isActive(job) && job.mode !== 'slurm')
+      ? JOB_POLL_INTERVAL_MS : SLURM_POLL_INTERVAL_MS
+    const timer = setInterval(refreshJobs, interval)
     return () => { clearInterval(timer) }
   }, [jobs, refreshJobs])
 
@@ -73,7 +78,8 @@ export function JobsSection({
     if (submitting || selectedServer === '' || command.trim() === '') return
     setSubmitting(true)
     setFormError(null)
-    void submitJob(selectedServer, command.trim(), experimentId === '' ? undefined : experimentId)
+    void submitJob(selectedServer, command.trim(), experimentId === '' ? undefined : experimentId,
+      mode, mode === 'slurm' ? parametersJson : undefined)
       .then((failure) => {
         if (failure !== null) {
           setFormError(failure.message)
@@ -85,7 +91,7 @@ export function JobsSection({
       .finally(() => { setSubmitting(false) })
   }
   const removeJob = (record: JobRecord): void => {
-    if (!window.confirm(t('jobs.confirmDelete'))) return
+    if (!window.confirm(t(isActive(record) && record.mode === 'slurm' ? 'jobs.confirmCancel' : 'jobs.confirmDelete'))) return
     void deleteJob(record.id).then((failure) => {
       setActionError(failure === null ? null : `${t('jobs.deleteFailed')}：${failure.message}`)
     })
@@ -95,6 +101,13 @@ export function JobsSection({
     <div className={css.jobsSection}>
       <h3 className={css.sectionTitle}>{t('jobs.title')}</h3>
       <div className={css.jobForm}>
+        <label className={css.field}>
+          <span className={css.fieldLabel}>{t('jobs.mode')}</span>
+          <select className={css.serverSelect} value={mode} onChange={event => { setMode(event.target.value as 'ssh' | 'slurm') }}>
+            <option value="ssh">SSH</option>
+            <option value="slurm">Slurm</option>
+          </select>
+        </label>
         <label className={css.field}>
           <span className={css.fieldLabel}>{t('jobs.server')}</span>
           <select
@@ -109,8 +122,14 @@ export function JobsSection({
           </select>
         </label>
         <label className={css.field} data-wide>
-          <span className={css.fieldLabel}>{t('jobs.command')}</span>
-          <input
+          <span className={css.fieldLabel}>{mode === 'slurm' ? t('jobs.script') : t('jobs.command')}</span>
+          {mode === 'slurm' ? <textarea
+            className={css.input}
+            rows={8}
+            value={command}
+            placeholder={t('jobs.scriptPlaceholder')}
+            onChange={event => { setCommand(event.target.value) }}
+          /> : <input
             className={css.input}
             value={command}
             placeholder={t('jobs.commandPlaceholder')}
@@ -118,8 +137,14 @@ export function JobsSection({
             onKeyDown={(event) => {
               if (event.key === 'Enter') submit()
             }}
-          />
+          />}
         </label>
+        {mode === 'slurm' && <label className={css.field} data-wide>
+          <span className={css.fieldLabel}>{t('jobs.parameters')}</span>
+          <textarea className={css.input} rows={3} value={parametersJson}
+            onChange={event => { setParametersJson(event.target.value) }} />
+          <small>{t('jobs.parametersHelp')}</small>
+        </label>}
         {experimentOptions.length > 0 && (
           <label className={css.field}>
             <span className={css.fieldLabel}>{t('jobs.experiment')}</span>
@@ -178,6 +203,9 @@ export function JobsSection({
                   <tr key={record.id}>
                     <td>
                       <code className={css.jobCommand} title={record.command}>{record.command}</code>
+                      {record.mode === 'slurm' && <span className={css.serverBadge}>Slurm {record.slurmJobId ?? '…'}</span>}
+                      {record.configHash !== undefined && <span className={css.serverBadge} title={record.configHash}>SHA-256 {record.configHash.slice(0, 12)}</span>}
+                      {record.remoteDir !== undefined && <code className={css.jobCommand} title={record.remoteDir}>{record.remoteDir}</code>}
                       {record.experimentId !== undefined && (
                         <span className={css.serverBadge}>🧪 {experimentNameOf(record.experimentId)}</span>
                       )}
@@ -198,6 +226,7 @@ export function JobsSection({
                       {record.exitCode !== null && record.exitCode !== 0 && (
                         <span className={css.jobExitCode}>{t('jobs.exitCode')} {record.exitCode}</span>
                       )}
+                      {record.statusNote !== undefined && record.statusNote !== '' && <small title={record.statusNote}>{record.statusNote}</small>}
                     </td>
                     <td>{relativeTime(t, record.createdAt)}</td>
                     <td>
@@ -219,7 +248,7 @@ export function JobsSection({
                         data-danger
                         onClick={() => { removeJob(record) }}
                       >
-                        {t('jobs.delete')}
+                        {isActive(record) && record.mode === 'slurm' ? t('jobs.cancel') : t('jobs.delete')}
                       </button>
                     </td>
                   </tr>

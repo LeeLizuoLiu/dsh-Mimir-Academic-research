@@ -308,6 +308,8 @@ export interface ResearchRemote {
     serverId: string
     command: string
     experimentId?: string | undefined
+    mode?: 'ssh' | 'slurm' | undefined
+    parametersJson?: string | undefined
   }) => Promise<RemoteResult<ResearchSubmitJobResult>>
   listJobs: (request: { serverId?: string }) => Promise<RemoteResult<ResearchListJobsResult>>
   deleteJob: (request: { id: string }) => Promise<RemoteResult<ResearchDeleteJobResult>>
@@ -3904,9 +3906,9 @@ export class ResearchController implements HostObservable<ResearchView> {
    * @param experimentId - the experiment to link, when given.
    * @returns null on success, the settled failure otherwise.
    */
-  async submitJob(serverId: string, command: string, experimentId?: string): Promise<ResearchFailureView | null> {
+  async submitJob(serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string): Promise<ResearchFailureView | null> {
     try {
-      const carried = await this.remote.submitJob({ serverId, command, experimentId })
+      const carried = await this.remote.submitJob({ serverId, command, experimentId, mode, parametersJson })
       if (this.disposed) return null
       if (!carried.ok) return failureOf(carried.error.code, carried.error.message)
       const result = carried.value
@@ -3931,6 +3933,12 @@ export class ResearchController implements HostObservable<ResearchView> {
       if (!carried.ok) return failureOf(carried.error.code, carried.error.message)
       const result = carried.value
       if (!result.ok) return businessFailure(result.error)
+      const active = this.view.jobs.list.find(record => record.id === id && record.mode === 'slurm'
+        && (record.status === 'queued' || record.status === 'running'))
+      if (active !== undefined) {
+        this.refreshJobs()
+        return null
+      }
       const current = this.view.jobs
       this.publish({
         jobs: Object.freeze({

@@ -60,6 +60,7 @@ Optional capabilities:
   bash scripts/setup-web-search.sh
   ```
 - **Zotero** — set `zotero.apiKey` / `zotero.userId` in the plugin config (keys at zotero.org/settings/keys)
+- **Slurm** — choose Slurm in the Servers job form to stage a batch script and parameter JSON, submit with `sbatch`, and track the scheduler job through experiment write-back. See [Slurm jobs](docs/slurm.md).
 
 ## Related projects
 

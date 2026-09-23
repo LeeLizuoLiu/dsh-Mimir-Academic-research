@@ -137,6 +137,11 @@ export const serverRecord = z.object({
 /** Durable shape of one remote job submitted over ssh. */
 export const jobRecord = z.object({
   id: z.string(),
+  mode: z.literal('slurm').optional(),
+  slurmJobId: z.string().regex(/^\d+$/).optional(),
+  remoteDir: z.string().optional(),
+  configHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  statusNote: z.string().optional(),
   serverId: z.string(),
   command: z.string(),
   // Widened with 'unknown' (#225): additive enum extension, old snapshots

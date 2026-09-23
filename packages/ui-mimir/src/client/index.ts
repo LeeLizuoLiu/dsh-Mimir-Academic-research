@@ -371,7 +371,7 @@ function panelApply(ctx: ClientContext): void {
       checkAllServers: () => { void controller.checkAllServers() },
       ensureJobs: () => { controller.ensureJobs() },
       refreshJobs: () => { controller.refreshJobs() },
-      submitJob: (serverId, command, experimentId) => controller.submitJob(serverId, command, experimentId),
+      submitJob: (serverId, command, experimentId, mode, parametersJson) => controller.submitJob(serverId, command, experimentId, mode, parametersJson),
       deleteJob: (id) => controller.deleteJob(id),
       ensureBibliography: (projectId) => { controller.ensureBibliography(projectId) },
       reloadBibliography: () => { controller.reloadBibliography() },

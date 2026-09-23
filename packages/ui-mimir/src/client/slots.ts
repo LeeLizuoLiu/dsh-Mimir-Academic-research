@@ -485,7 +485,7 @@ export interface ResearchPanelInjected {
    * @param experimentId - the experiment to link, when given.
    * @returns null on success, the settled failure otherwise.
    */
-  submitJob: (serverId: string, command: string, experimentId?: string) => Promise<ResearchFailureView | null>
+  submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string) => Promise<ResearchFailureView | null>
   /**
    * Delete one job record, dropping it from the loaded list.
    * @param id - job record id.

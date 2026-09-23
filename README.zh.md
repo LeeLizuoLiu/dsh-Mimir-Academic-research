@@ -60,6 +60,7 @@ dsh web                                          # 然后打开 http://127.0.0.1
   bash scripts/setup-web-search.sh
   ```
 - **Zotero**——在插件配置里填 `zotero.apiKey` / `zotero.userId`（key 在 zotero.org/settings/keys 免费生成）
+- **Slurm**——在「服务器」的任务表单选择 Slurm，提交批处理脚本与参数 JSON，并将调度器状态回写关联实验。细节见 [Slurm 任务说明](docs/slurm.md)。
 
 ## 相关项目
 

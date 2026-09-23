@@ -734,13 +734,15 @@ export class ResearchService extends TypertRemoteService {
     serverId: string
     command: string
     experimentId?: string | undefined
+    mode?: 'ssh' | 'slurm' | undefined
+    parametersJson?: string | undefined
   }): Promise<ResearchSubmitJobResult> {
     return server.submitJob(this.deps, this.state, request)
   }
 
   @Remote('listJobs')
   listJobs(request: { serverId?: string }): Promise<ResearchListJobsResult> {
-    return server.listJobs(this.deps, request)
+    return server.listJobs(this.deps, this.state, request)
   }
 
   @Remote('deleteJob')
