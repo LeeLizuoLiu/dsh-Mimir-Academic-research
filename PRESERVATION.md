@@ -16,7 +16,7 @@ The package version remains upstream `0.20.0`; identify this customization by it
 ## Frozen snapshot
 
 Use branch `backup/dsh-0.1.6-alpha.2-2026-10-02` and tag `mimir-custom-dsh-0.1.6-alpha.2-20261002` as the recovery baseline.
-The release asset `dsh-mimir-0.20.0-custom-dsh-0.1.6-alpha.2.tgz` contains the exact installed compiled plugin, without rebuilding.
+The locally saved installable package `dsh-mimir-0.20.0-custom-dsh-0.1.6-alpha.2.tgz` contains the exact installed compiled plugin, without rebuilding.
 The source checkout and Git bundle are also saved in the local backup.
 
 To restore the plugin while running the pinned old Web DSH, stop Web DSH and run:
