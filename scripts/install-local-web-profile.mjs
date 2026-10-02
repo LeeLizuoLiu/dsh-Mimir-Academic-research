@@ -7,6 +7,10 @@ import { dirname, join, resolve } from 'node:path'
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const profile = process.argv[2] ?? '/Users/leeliu/.dsh/profiles/web'
 const source = join(repo, 'packages/mimir')
+const clientBundle = await readFile(join(source, 'lib/client.js'), 'utf8')
+if ((clientBundle.match(/create: \(\) => [A-Za-z_$][\w$]*\$schema/g) ?? []).length < 100) {
+  throw new Error('local Mimir bundle is missing DSH codec compatibility factories; run the build first')
+}
 const store = '/Users/leeliu/Library/pnpm/store/v11'
 const backup = join(repo, '..', `web-profile-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`)
 await mkdir(backup, { recursive: true })

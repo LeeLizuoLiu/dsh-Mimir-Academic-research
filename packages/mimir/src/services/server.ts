@@ -32,13 +32,16 @@ import type {
   ServerRecord,
   ServerStatusView,
 } from '../types.ts'
+import { DEFAULT_REMOTE_JOB_ROOT } from '../types.ts'
+import { sharedSsh, type SharedSshTransport } from './ssh-transport.ts'
 import { nextRecordId, rejected, success } from './common.ts'
 import type { ServiceState } from './common.ts'
-import { cancelSlurm, configurationHash, parseParameters, probeSlurm, slurmLogs, SlurmSubmissionError, submitSlurm } from './slurm.ts'
-import type { Parameters } from './slurm.ts'
+import { cancelSlurm, configurationHash, parseParameters, probeSlurm, slurmLogs, SlurmSubmissionError, stageSourceTree, submitSlurm } from './slurm.ts'
+import type { Parameters, SourceTreeDigest } from './slurm.ts'
 
 /** Everything the Server domain functions need from the service scope. */
 export interface ServerDeps {
+  readonly sshTransport?: SharedSshTransport
   /** Absolute research workspace root (for the settled-job experiment log append). */
   readonly workspaceDir: string
   readonly domain: ResearchWikiDomain
@@ -55,12 +58,10 @@ export interface ServerDeps {
 
 /** TCP reachability probe timeout; part of the checkServer probe contract. */
 const TCP_PROBE_TIMEOUT_MS = 4000
-/** Timeout of the best-effort ssh `nvidia-smi` readout. */
-const GPU_PROBE_TIMEOUT_MS = 8000
-/** Connect timeout handed to the ssh client itself. */
-const GPU_PROBE_SSH_CONNECT_TIMEOUT_S = 5
 /** The remote command whose CSV output feeds the GPU table. */
 const NVIDIA_SMI_QUERY = 'nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits'
+/** Check the tools Mimir actually needs to submit and observe Slurm jobs. */
+const SLURM_QUERY = 'command -v sbatch >/dev/null && command -v squeue >/dev/null'
 
 /** Hard cap of one submitted command line (the durable record stores it verbatim). */
 const JOB_COMMAND_MAX_CHARS = 4000
@@ -124,6 +125,30 @@ type GpuProbeOutcome =
   | { readonly ok: true; readonly gpus: readonly ServerGpuView[] }
   | { readonly ok: false; readonly stage: 'ssh' | 'gpu'; readonly message: string }
 
+type SlurmProbeOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly stage: 'ssh' | 'slurm'; readonly message: string }
+
+/** A login node is checked for scheduler tools, never for a local GPU. */
+async function probeSlurmCommands(record: ServerRecord, transport: SharedSshTransport): Promise<SlurmProbeOutcome> {
+  try {
+    await transport.ssh(record, SLURM_QUERY)
+    return { ok: true }
+  } catch (error) {
+    const code = (error as { code?: unknown }).code
+    const stderr = typeof error === 'object' && error !== null && 'stderr' in error
+      ? String((error as { stderr: unknown }).stderr).trim()
+      : ''
+    return {
+      ok: false,
+      stage: code === 255 ? 'ssh' : 'slurm',
+      message: stderr || (code === 255
+        ? 'SSH connection or authentication failed'
+        : 'sbatch or squeue is unavailable in the remote shell'),
+    }
+  }
+}
+
 /**
  * Read one server's GPU table over a batch-mode ssh call. Best-effort: an ssh
  * or `nvidia-smi` failure is the `ok: false` branch, never a rejection, so the
@@ -132,18 +157,9 @@ type GpuProbeOutcome =
  * @returns the parsed GPU rows, or the failure stage (`ssh` session vs `gpu`
  * readout) plus the failure message.
  */
-async function probeGpus(record: ServerRecord): Promise<GpuProbeOutcome> {
+async function probeGpus(record: ServerRecord, transport: SharedSshTransport): Promise<GpuProbeOutcome> {
   try {
-    const { stdout } = await execFileAsync('ssh', [
-      '-o', 'BatchMode=yes',
-      '-o', `ConnectTimeout=${String(GPU_PROBE_SSH_CONNECT_TIMEOUT_S)}`,
-      '-p', String(record.port),
-      // `--` ends option parsing: a stored record predating input validation
-      // can never turn the login target into an ssh flag.
-      '--',
-      `${record.username}@${record.host}`,
-      NVIDIA_SMI_QUERY,
-    ], { timeout: GPU_PROBE_TIMEOUT_MS })
+    const { stdout } = await transport.ssh(record, NVIDIA_SMI_QUERY)
     const gpus: ServerGpuView[] = []
     for (const line of stdout.split('\n')) {
       const trimmed = line.trim()
@@ -181,6 +197,15 @@ async function probeGpus(record: ServerRecord): Promise<GpuProbeOutcome> {
  */
 const SSH_TOKEN_RE = /^[a-zA-Z0-9._:-]+$/
 const SSH_USERNAME_RE = /^[a-zA-Z0-9._-]+$/
+const REMOTE_ROOT_RE = /^[a-zA-Z0-9._/-]+$/
+
+/** Accept a home-relative or absolute path without shell syntax or traversal. */
+function validRemoteJobRoot(root: string): boolean {
+  if (root === '' || root.length > 512 || root === '/' || !REMOTE_ROOT_RE.test(root)) return false
+  const parts = root.split('/')
+  return parts.every((part, index) => (part !== '' || (index === 0 && root.startsWith('/')))
+    && part !== '.' && part !== '..')
+}
 
 /** First invalid-input message for one server upsert payload, or null when valid. */
 function validateServerInput(input: ServerInput): string | null {
@@ -192,6 +217,12 @@ function validateServerInput(input: ServerInput): string | null {
   if (input.username !== undefined && input.username.trim() !== ''
     && (input.username.startsWith('-') || !SSH_USERNAME_RE.test(input.username))) {
     return 'username must be a plain ssh login user (letters, digits, dots, dashes, underscores)'
+  }
+  if (input.role !== undefined && input.role !== 'login' && input.role !== 'compute') {
+    return 'role must be login or compute'
+  }
+  if (input.remoteJobRoot !== undefined && !validRemoteJobRoot(input.remoteJobRoot)) {
+    return 'remote job directory must be a home-relative or absolute path without spaces, shell syntax, or .. segments'
   }
   if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) {
     return 'port must be an integer between 1 and 65535'
@@ -247,6 +278,8 @@ export async function saveServer(
       host: input.host,
       port: input.port,
       username: input.username,
+      role: input.role ?? existing.role,
+      remoteJobRoot: input.remoteJobRoot ?? existing.remoteJobRoot ?? DEFAULT_REMOTE_JOB_ROOT,
       note: input.note,
       tags: tags ?? existing.tags,
       updatedAt: now,
@@ -266,6 +299,8 @@ export async function saveServer(
     host: input.host,
     port: input.port,
     username: input.username,
+    role: input.role ?? 'compute',
+    remoteJobRoot: input.remoteJobRoot ?? DEFAULT_REMOTE_JOB_ROOT,
     note: input.note,
     tags: tags ?? [],
     createdAt: now,
@@ -307,14 +342,9 @@ export async function deleteServer(
 }
 
 /**
- * Probe one remembered server. The probe is two best-effort stages: a TCP
- * connect (failure settles the view `offline`), then — only when the TCP
- * probe connected and the record names a login user — a batch-mode ssh
- * `nvidia-smi` readout whose failure downgrades the GPU table to empty
- * without flipping the state. The settled view reports the stage where the
- * probe stopped (`stage`: the failed stage on failure, the deepest completed
- * stage on success) and the per-stage latencies (`tcpLatencyMs`,
- * `gpuLatencyMs`) so the panel can say which stage hung or failed.
+ * Check the capability appropriate to the
+ * server role over authenticated SSH: Slurm commands on a login node or nvidia-smi on a compute
+ * node. Only servers without a username use TCP-only reachability.
  * @param deps - open wiki domain.
  * @param request - the record id; an unknown id is `server-not-found`.
  * @returns the settled probe view.
@@ -327,39 +357,38 @@ export async function checkServer(
   if (record === undefined) {
     return rejected({ code: 'server-not-found', id: request.id })
   }
-  const tcp = await probeTcp(record.host, record.port)
-  if (!tcp.ok) {
-    return success<ServerStatusView>({
-      state: 'offline',
-      latencyMs: null,
-      gpus: Object.freeze([]),
-      checkedAt: new Date().toISOString(),
-      message: tcp.message,
-      stage: 'tcp',
-    })
-  }
+  // Never open an unauthenticated TCP probe for an SSH-capable server.
   if (record.username === '') {
+    const tcp = await probeTcp(record.host, record.port)
     return success<ServerStatusView>({
-      state: 'online',
-      latencyMs: tcp.latencyMs,
-      gpus: Object.freeze([]),
-      checkedAt: new Date().toISOString(),
-      message: null,
-      stage: 'tcp',
-      tcpLatencyMs: tcp.latencyMs,
+      state: tcp.ok ? 'online' : 'offline',
+      latencyMs: tcp.ok ? tcp.latencyMs : null,
+      gpus: Object.freeze([]), checkedAt: new Date().toISOString(),
+      message: tcp.ok ? null : tcp.message, stage: 'tcp',
+      ...(tcp.ok ? { tcpLatencyMs: tcp.latencyMs } : {}),
     })
   }
-  const gpuStartedAt = Date.now()
-  const gpu = await probeGpus(record)
+  const startedAt = Date.now()
+  const transport = deps.sshTransport ?? sharedSsh
+  if (record.role === 'login') {
+    const slurm = await probeSlurmCommands(record, transport)
+    return success<ServerStatusView>({
+      state: !slurm.ok && slurm.stage === 'ssh' ? 'offline' : 'online',
+      latencyMs: slurm.ok ? Date.now() - startedAt : null,
+      gpus: Object.freeze([]), checkedAt: new Date().toISOString(),
+      message: slurm.ok ? null : slurm.message,
+      stage: slurm.ok ? 'slurm' : slurm.stage,
+      slurmLatencyMs: Date.now() - startedAt,
+    })
+  }
+  const gpu = await probeGpus(record, transport)
   return success<ServerStatusView>({
-    state: 'online',
-    latencyMs: tcp.latencyMs,
-    gpus: gpu.ok ? gpu.gpus : Object.freeze([]),
-    checkedAt: new Date().toISOString(),
+    state: !gpu.ok && gpu.stage === 'ssh' ? 'offline' : 'online',
+    latencyMs: gpu.ok ? Date.now() - startedAt : null,
+    gpus: gpu.ok ? gpu.gpus : Object.freeze([]), checkedAt: new Date().toISOString(),
     message: gpu.ok ? null : `gpu probe failed: ${gpu.message}`,
     stage: gpu.ok ? 'gpu' : gpu.stage,
-    tcpLatencyMs: tcp.latencyMs,
-    gpuLatencyMs: Date.now() - gpuStartedAt,
+    gpuLatencyMs: Date.now() - startedAt,
   })
 }
 
@@ -419,6 +448,7 @@ export async function submitJob(
     experimentId?: string | undefined
     mode?: 'ssh' | 'slurm' | undefined
     parametersJson?: string | undefined
+    sourceDirectory?: string | undefined
   },
 ): Promise<ResearchSubmitJobResult> {
   const server = deps.domain.table('servers').get(request.serverId)
@@ -435,13 +465,14 @@ export async function submitJob(
     return rejected({ code: 'invalid-input', message: 'mode must be ssh or slurm' })
   }
   let parameters: Parameters = {}
+  let source: SourceTreeDigest | undefined
   if (request.mode === 'slurm') {
     try { parameters = parseParameters(request.parametersJson) }
     catch (error) {
       return rejected({ code: 'invalid-input', message: error instanceof Error ? error.message : 'invalid parameters JSON' })
     }
-  } else if (request.parametersJson !== undefined && request.parametersJson.trim() !== '') {
-    return rejected({ code: 'invalid-input', message: 'parameters JSON requires Slurm mode' })
+  } else if ((request.parametersJson !== undefined && request.parametersJson.trim() !== '') || request.sourceDirectory !== undefined) {
+    return rejected({ code: 'invalid-input', message: 'parameters JSON and source directory require Slurm mode' })
   }
   if (server.username === '') {
     return rejected({ code: 'invalid-input', message: `server ${server.name} has no ssh login user` })
@@ -450,8 +481,15 @@ export async function submitJob(
     && deps.domain.table('experiments').get(request.experimentId) === undefined) {
     return rejected({ code: 'experiment-not-found', id: request.experimentId })
   }
+  if (request.mode === 'slurm' && request.sourceDirectory !== undefined && request.sourceDirectory.trim() !== '') {
+    try { source = await stageSourceTree(request.sourceDirectory) }
+    catch (error) { return rejected({ code: 'invalid-input', message: error instanceof Error ? error.message : 'could not read source directory' }) }
+  }
   state.jobSeq += 1
   const jobId = `job-${Date.now().toString(36)}-${String(state.jobSeq)}`
+  const remoteRoot = server.remoteJobRoot ?? DEFAULT_REMOTE_JOB_ROOT
+  const remoteBase = remoteRoot.startsWith('/') ? remoteRoot : `$HOME/${remoteRoot}`
+  const remoteDir = `${remoteBase}/${jobId}`
   const job: JobRecord = {
     id: jobId,
     ...(request.mode === 'slurm' ? { mode: 'slurm' as const } : {}),
@@ -466,11 +504,17 @@ export async function submitJob(
     stderrTail: '',
     createdAt: new Date().toISOString(),
     ...(request.mode === 'slurm' ? {
-      remoteDir: `~/.mimir/jobs/${jobId}`,
-      configHash: configurationHash(command, parameters),
+      remoteDir,
+      ...(source === undefined ? {} : {
+        remoteSourceDir: `${remoteDir}/source`,
+        sourceSha256: source.sha256,
+        sourceFileCount: source.fileCount,
+      }),
+      configHash: configurationHash(command, parameters, source?.sha256),
     } : {}),
   }
-  await deps.domain.table('jobs').put(job.id, job)
+  try { await deps.domain.table('jobs').put(job.id, job) }
+  catch (error) { await source?.cleanup(); throw error }
   if (request.experimentId !== undefined) {
     await markExperiment(deps, request.experimentId, 'running', server.id)
   }
@@ -486,7 +530,7 @@ export async function submitJob(
   })
   // Register ownership before yielding so deletion can cancel the queued race.
   if (job.mode === 'slurm') {
-    void runSlurmSubmission(deps, state, job.id, parameters)
+    void runSlurmSubmission(deps, state, job.id, parameters, source)
   } else {
     const abort = new AbortController()
     state.jobAborts.set(job.id, abort)
@@ -506,7 +550,7 @@ export async function submitJob(
 export async function listJobs(
   deps: ServerDeps,
   state: ServiceState,
-  request: { serverId?: string },
+  request: { serverId?: string; refresh?: boolean },
 ): Promise<ResearchListJobsResult> {
   if (request.serverId !== undefined
     && deps.domain.table('servers').get(request.serverId) === undefined) {
@@ -514,7 +558,7 @@ export async function listJobs(
   }
   await Promise.all([...deps.domain.table('jobs').entries()]
     .map(([, job]) => job)
-    .filter(job => job.mode === 'slurm' && job.slurmJobId !== undefined && isActiveJobStatus(job.status)
+    .filter(job => request.refresh === true && job.mode === 'slurm' && job.slurmJobId !== undefined && isActiveJobStatus(job.status)
       && (request.serverId === undefined || job.serverId === request.serverId))
     .map(job => refreshSlurmJob(deps, state, job)))
   const jobs = [...deps.domain.table('jobs').entries()]
@@ -550,7 +594,7 @@ export async function deleteJob(
     const server = deps.domain.table('servers').get(existing.serverId)
     if (server === undefined) return rejected({ code: 'server-not-found', id: existing.serverId })
     try {
-      await cancelSlurm(server, existing)
+      await cancelSlurm(server, existing, deps.sshTransport)
       await table.put(existing.id, { ...existing, statusNote: 'scancel requested; awaiting scheduler confirmation' })
       return success({ id: existing.id })
     } catch (error) {
@@ -572,17 +616,18 @@ export async function deleteJob(
 }
 
 /** Background stage and sbatch handshake; the durable record carries errors. */
-async function runSlurmSubmission(deps: ServerDeps, state: ServiceState, id: string, parameters: Parameters): Promise<void> {
+async function runSlurmSubmission(deps: ServerDeps, state: ServiceState, id: string, parameters: Parameters, source?: SourceTreeDigest): Promise<void> {
   const table = deps.domain.table('jobs')
   const job = table.get(id)
-  if (job === undefined) return
+  if (job === undefined) { await source?.cleanup(); return }
   const server = deps.domain.table('servers').get(job.serverId)
   if (server === undefined) {
     await finishJob(deps, state, { ...job, status: 'failed', stderrTail: 'server record deleted before Slurm submission', finishedAt: new Date().toISOString() })
+    await source?.cleanup()
     return
   }
   try {
-    const slurmJobId = await submitSlurm(server, job, parameters)
+    const slurmJobId = await submitSlurm(server, job, parameters, source, deps.sshTransport)
     const current = table.get(id)
     if (current !== undefined && isActiveJobStatus(current.status)) {
       await table.put(id, { ...current, slurmJobId, statusNote: `Slurm job ${slurmJobId} accepted` })
@@ -597,6 +642,8 @@ async function runSlurmSubmission(deps: ServerDeps, state: ServiceState, id: str
       stderrTail: `${error instanceof Error ? error.message : String(error)}${uncertain ? '\nsbatch may have accepted the job; inspect the remote directory before retrying' : ''}`,
       finishedAt: new Date().toISOString(),
     })
+  } finally {
+    await source?.cleanup()
   }
 }
 
@@ -626,11 +673,11 @@ async function syncSlurmJob(deps: ServerDeps, state: ServiceState, job: JobRecor
     return
   }
   try {
-    const probe = await probeSlurm(server, current)
+    const probe = await probeSlurm(server, current, deps.sshTransport)
     const latest = table.get(job.id)
     if (latest === undefined || !isActiveJobStatus(latest.status)) return
     let logs: { stdout: string; stderr: string } | undefined
-    try { logs = await slurmLogs(server, latest) }
+    try { logs = await slurmLogs(server, latest, deps.sshTransport) }
     catch { /* Scheduler state remains usable when log files are unavailable. */ }
     const next: JobRecord = {
       ...latest,
@@ -703,7 +750,7 @@ async function runJob(
   try {
     const { stdout, stderr } = await execFileAsync('ssh', [
       '-o', 'BatchMode=yes',
-      '-o', `ConnectTimeout=${String(GPU_PROBE_SSH_CONNECT_TIMEOUT_S)}`,
+      '-o', `ConnectTimeout=${String(15)}`,
       '-p', String(server.port),
       '--',
       `${server.username}@${server.host}`,

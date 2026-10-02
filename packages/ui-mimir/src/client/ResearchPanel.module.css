@@ -509,9 +509,9 @@
 
 .sideProjects {
   flex: 1;
-  /* The floor keeps the toggle plus a row and a half visible at any window
-     height (the nav above absorbs the squeeze with its own scroll). */
-  min-height: 108px;
+  /* Keep the heading, one project, and both actions visible before the
+     navigation above yields space to its own scrollbar. */
+  min-height: 156px;
   overflow-y: auto;
   padding: 12px;
   border-top: 1px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 4%));
@@ -752,13 +752,20 @@
 
 /* The list's bottom button row (new / import). */
 .projectButtons {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   margin-top: 8px;
 }
 
 .projectButtons .btn {
-  flex: 1;
+  width: 100%;
+  height: auto;
+  min-height: 28px;
+  padding-block: 5px;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* The rail's session switcher: the delivery target of the panel's
@@ -766,8 +773,9 @@
 .sessionBar {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
   padding: 8px 12px;
   border-top: 1px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 4%));
 }
@@ -779,7 +787,7 @@
 }
 
 .sessionSelect {
-  flex: 1;
+  width: 100%;
   min-width: 0;
   height: 26px;
   padding: 0 6px;
@@ -788,6 +796,12 @@
   background: var(--dsw-specific-menu, #fff);
   color: var(--dsw-alias-label-secondary, #3c4557);
   font-size: 12px;
+}
+
+.sessionHint {
+  color: var(--dsw-alias-label-tertiary, #5b6474);
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 /* Project titles wrap to two lines before clamping, so a long title like a
@@ -2879,7 +2893,7 @@ li.dropIndicator {
   object-fit: contain;
 }
 
-/* Servers view: the compute-server card grid plus the inline add/edit form. */
+/* Servers view: full-width node summaries plus the inline add/edit form. */
 .servers {
   display: flex;
   flex-direction: column;
@@ -2891,20 +2905,37 @@ li.dropIndicator {
 
 .serversGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
 .serverCard {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+  gap: 16px 24px;
+  padding: 20px 22px;
   border: 1px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 10%));
   border-radius: 14px;
   background: var(--dsw-specific-menu, #fff);
   box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.serverCardMain,
+.serverCardDetails {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.serverCardDetails:empty {
+  display: none;
+}
+
+.serverCard:has(.serverCardDetails:empty) .serverCardMain {
+  grid-column: 1 / -1;
 }
 
 .serverCard:hover {
@@ -2913,9 +2944,10 @@ li.dropIndicator {
 }
 
 .serverCardHead {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px 12px;
 }
 
 /* The probe-status dot: green online, red offline, grey never probed, and a
@@ -2951,28 +2983,37 @@ li.dropIndicator {
 
 .serverCardTitle {
   display: flex;
-  flex: 1;
   min-width: 0;
-  flex-direction: column;
-  gap: 2px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
 }
 
 .serverName {
   overflow: hidden;
   color: var(--dsw-alias-label-primary, #17233d);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
 .serverAddress {
-  overflow: hidden;
+  flex-basis: 100%;
+  min-width: 0;
   color: var(--dsw-alias-label-tertiary, #5b6474);
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.serverRole {
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 10%));
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary, #3c4557);
+  font-size: 11px;
   white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
 /* The textual twin of the dot, painted in the same state color. */
@@ -3042,13 +3083,34 @@ li.dropIndicator {
 
 .serverMessage {
   margin: 0;
-  padding: 6px 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--dsw-alias-state-error-secondary, rgb(236 19 19 / 10%));
   border-radius: 8px;
   background: var(--dsw-alias-state-error-secondary, rgb(236 19 19 / 8%));
   color: var(--dsw-alias-state-error-primary, #d93026);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.serverCapability {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 10%));
+  border-radius: 10px;
+  background: var(--dsw-alias-markdown-code-block, #f9fafb);
+  color: var(--dsw-alias-label-primary, #17233d);
+  font-size: 12px;
+}
+
+.serverCapability small {
+  flex-basis: 100%;
+  color: var(--dsw-alias-label-tertiary, #5b6474);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .gpuList {
@@ -3113,8 +3175,18 @@ li.dropIndicator {
 
 .serverActions {
   display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 6%));
+}
+
+@media (max-width: 760px) {
+  .serverCard {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* The inline add/edit form card above the grid. */
@@ -3187,6 +3259,12 @@ li.dropIndicator {
 .serverFormActions {
   display: flex;
   gap: 8px;
+}
+
+.serverForm .serverSelect {
+  width: 100%;
+  max-width: none;
+  height: 32px;
 }
 
 /* Bibliography panel: the references.bib entry list plus the library import
@@ -3872,11 +3950,11 @@ li.dropIndicator {
 }
 
 .jobForm {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px 14px;
-  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: minmax(150px, 180px) minmax(170px, 240px) minmax(170px, 1fr);
+  align-items: end;
+  gap: 16px;
+  padding: 20px 22px;
   border: 1px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 10%));
   border-radius: 14px;
   background: var(--dsw-specific-menu, #fff);
@@ -3884,7 +3962,44 @@ li.dropIndicator {
 }
 
 .jobForm .field[data-wide] {
-  flex: 1 1 320px;
+  grid-column: 1 / -1;
+}
+
+.jobForm .serverSelect {
+  width: 100%;
+  max-width: none;
+  height: 36px;
+}
+
+.jobForm textarea.input {
+  height: auto;
+  min-height: 76px;
+  padding: 10px 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.jobForm .field[data-script] textarea.input {
+  min-height: 150px;
+}
+
+.jobForm small {
+  max-width: 70ch;
+  color: var(--dsw-alias-label-tertiary, #5b6474);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.jobForm > button {
+  grid-column: 1 / -1;
+  justify-self: end;
+  min-width: 120px;
+}
+
+@media (max-width: 700px) {
+  .jobForm {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .jobCommand {
@@ -4767,15 +4882,7 @@ li.dropIndicator {
 .venueClear:hover:not(:disabled) {   text-decoration: underline;
 }
 
-.serverMessageText {   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.serverMessage[data-open] .serverMessageText {   white-space: normal;
-  word-break: break-word;
-}
+.serverMessageText { overflow-wrap: anywhere; }
 
 /* Snapshots panel: the snapshot list reuses the bib card language
    (.bibPanel/.bibItem/.bibRow); only the snapshot-specific bits and the

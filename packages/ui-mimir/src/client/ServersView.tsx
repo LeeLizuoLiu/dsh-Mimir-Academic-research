@@ -8,11 +8,12 @@
  */
 
 import { useEffect, useState } from 'react'
-import type { ExperimentRecord, ServerInput, ServerRecord } from 'dsh-mimir/types'
+import type { ExperimentRecord, ServerInput, ServerRecord, ServerRole } from 'dsh-mimir/types'
+import { DEFAULT_REMOTE_JOB_ROOT } from 'dsh-mimir/types'
 import type {
   ResearchFailureView, ResearchJobsView, ResearchProjectSlice, ResearchServersView, ServerCheckState,
 } from './controller.ts'
-import { collectServerTags, failureCopy, filterServers, PROBE_FAILURE_KEYS, PROBE_STAGE_KEYS, probeStageOf, relativeTime, type ResearchT } from './view-common.ts'
+import { collectServerTags, failureCopy, filterServers, PROBE_FAILURE_KEYS, relativeTime, type ResearchT } from './view-common.ts'
 import { EmptyState } from './EmptyState.tsx'
 import { ViewHead } from './ViewHead.tsx'
 import { JobsSection } from './JobsSection.tsx'
@@ -24,12 +25,14 @@ interface ServerFormState {
   readonly host: string
   readonly port: string
   readonly username: string
+  readonly role: ServerRole
+  readonly remoteJobRoot: string
   readonly note: string
   readonly tags: readonly string[]
 }
 
 /** The blank form the add button opens. */
-const EMPTY_FORM: ServerFormState = { name: '', host: '', port: '22', username: '', note: '', tags: [] }
+const EMPTY_FORM: ServerFormState = { name: '', host: '', port: '22', username: '', role: 'login', remoteJobRoot: DEFAULT_REMOTE_JOB_ROOT, note: '', tags: [] }
 
 /** Form state of one existing record (the edit path's refill). */
 function formOf(record: ServerRecord): ServerFormState {
@@ -38,6 +41,8 @@ function formOf(record: ServerRecord): ServerFormState {
     host: record.host,
     port: String(record.port),
     username: record.username,
+    role: record.role,
+    remoteJobRoot: record.remoteJobRoot ?? DEFAULT_REMOTE_JOB_ROOT,
     note: record.note,
     tags: [...record.tags],
   }
@@ -57,19 +62,8 @@ function dotStateOf(check: ServerCheckState | undefined): string {
  * readout), with a worst-case ETA hint. The interval only ticks while this
  * line is mounted (i.e. while the card's probe is in flight).
  */
-function ProbeProgressLine({ t }: { readonly t: ResearchT }) {
-  const [elapsedMs, setElapsedMs] = useState(0)
-  useEffect(() => {
-    const startedAt = Date.now()
-    const timer = setInterval(() => { setElapsedMs(Date.now() - startedAt) }, 250)
-    return () => { clearInterval(timer) }
-  }, [])
-  return (
-    <>
-      <span className={css.serverProbeStage} role="status">{t(PROBE_STAGE_KEYS[probeStageOf(elapsedMs)])}</span>
-      <span className={css.serverProbeEta}>{t('servers.probe.eta')}</span>
-    </>
-  )
+function ProbeProgressLine({ t }: { readonly t: ResearchT; readonly role: ServerRole }) {
+  return <span className={css.serverProbeStage} role="status">{t('servers.probe.connecting')}</span>
 }
 
 /**
@@ -94,8 +88,8 @@ export function ServersView({
   readonly jobs: ResearchJobsView
   readonly experiments: ResearchProjectSlice<readonly ExperimentRecord[]> | null
   readonly ensureJobs: () => void
-  readonly refreshJobs: () => void
-  readonly submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string) => Promise<ResearchFailureView | null>
+  readonly refreshJobs: (refresh?: boolean) => void
+  readonly submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string, sourceDirectory?: string) => Promise<ResearchFailureView | null>
   readonly deleteJob: (id: string) => Promise<ResearchFailureView | null>
   readonly t: ResearchT
 }) {
@@ -107,19 +101,9 @@ export function ServersView({
   const [actionError, setActionError] = useState<string | null>(null)
   const [activeTag, setActiveTag] = useState<string | null>(null)
   const [tagInput, setTagInput] = useState('')
-  /** The card whose probe-failure line is expanded; null collapses them all. */
-  const [openMessageId, setOpenMessageId] = useState<string | null>(null)
 
-  // The view mounts only while its tab is active: load the list once, then
-  // probe every listed server exactly once (a settled or in-flight probe
-  // occupies the id's slot, so the effect never re-fires it).
+  // Opening the view only reads local records; network probes are user actions.
   useEffect(() => { ensureServers() }, [ensureServers])
-  useEffect(() => {
-    if (servers.status !== 'ready') return
-    for (const server of servers.list) {
-      if (checks[server.id] === undefined) void checkServer(server.id)
-    }
-  }, [servers, checks, checkServer])
 
   const openAdd = (): void => {
     setEditing('new')
@@ -155,6 +139,8 @@ export function ServersView({
       host: form.host,
       port: Number(form.port),
       username: form.username,
+      role: form.role,
+      remoteJobRoot: form.remoteJobRoot.trim(),
       note: form.note,
       tags: [...tags],
     }
@@ -241,6 +227,21 @@ export function ServersView({
                 onChange={event => { patchForm({ username: event.target.value }) }}
               />
             </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('servers.form.role')}</span>
+              <select className={css.serverSelect} value={form.role}
+                onChange={event => { patchForm({ role: event.target.value as ServerRole }) }}>
+                <option value="login">{t('servers.role.login')}</option>
+                <option value="compute">{t('servers.role.compute')}</option>
+              </select>
+            </label>
+            {form.role === 'login' && <label className={css.field} data-wide>
+              <span className={css.fieldLabel}>{t('servers.form.remoteJobRoot')}</span>
+              <input className={css.input} value={form.remoteJobRoot}
+                placeholder={DEFAULT_REMOTE_JOB_ROOT}
+                onChange={event => { patchForm({ remoteJobRoot: event.target.value }) }} />
+              <small>{t('servers.form.remoteJobRootHelp')}</small>
+            </label>}
             <label className={css.field} data-wide>
               <span className={css.fieldLabel}>{t('servers.form.note')}</span>
               <input
@@ -330,11 +331,13 @@ export function ServersView({
             const checking = check === 'checking'
             const settled = check !== undefined && check !== 'checking' ? check : null
             return (
-              <article key={record.id} className={css.serverCard}>
+              <article key={record.id} className={css.serverCard} data-role={record.role}>
+                <div className={css.serverCardMain}>
                 <div className={css.serverCardHead}>
                   <span className={css.serverDot} data-state={dotStateOf(check)} aria-hidden />
                   <div className={css.serverCardTitle}>
                     <span className={css.serverName}>{record.name}</span>
+                    <span className={css.serverRole}>{t(`servers.role.${record.role}`)}</span>
                     <code className={css.serverAddress}>
                       {record.username === '' ? '' : `${record.username}@`}
                       {record.host}:{record.port}
@@ -349,6 +352,9 @@ export function ServersView({
                   </span>
                 </div>
                 {record.note !== '' && <p className={css.serverNote}>{record.note}</p>}
+                {record.role === 'login' && <p className={css.serverNote}>
+                  {t('servers.form.remoteJobRoot')}: <code>{record.remoteJobRoot ?? DEFAULT_REMOTE_JOB_ROOT}</code>
+                </p>}
                 {record.tags.length > 0 && (
                   <p className={css.paperTags}>
                     {record.tags.map(tag => (
@@ -367,7 +373,7 @@ export function ServersView({
                 )}
                 <p className={css.serverProbe}>
                   {settled === null
-                    ? checking ? <ProbeProgressLine t={t} /> : t('servers.neverChecked')
+                    ? checking ? <ProbeProgressLine t={t} role={record.role} /> : t('servers.neverChecked')
                     : (
                       <>
                         {settled.latencyMs !== null && <span>{settled.latencyMs} ms · </span>}
@@ -375,27 +381,32 @@ export function ServersView({
                       </>
                     )}
                 </p>
+                </div>
+                <div className={css.serverCardDetails}>
+                {record.role === 'login' && (
+                  <div className={css.serverCapability}>
+                    <strong>{t('servers.login.title')}</strong>
+                    <span>{settled === null
+                      ? t('servers.login.pending')
+                      : settled.stage === 'tcp'
+                        ? t('servers.login.sshFailed')
+                      : settled.stage === 'slurm'
+                        ? settled.message === null ? t('servers.login.ready') : t('servers.login.unavailable')
+                        : t('servers.login.sshFailed')}</span>
+                    <small>{t('servers.login.description')}</small>
+                  </div>
+                )}
                 {settled !== null && settled.message !== null && (
-                  /* The probe failure renders as a quiet one-line error row:
-                     truncated by default, the title tooltip shows it on hover
-                     and the click toggles the full text (aria-expanded). */
-                  <button
-                    type="button"
-                    className={css.serverMessage}
-                    data-open={openMessageId === record.id || undefined}
-                    aria-expanded={openMessageId === record.id}
-                    title={settled.message}
-                    onClick={() => { setOpenMessageId(prev => (prev === record.id ? null : record.id)) }}
-                  >
+                  <p className={css.serverMessage} role="status">
                     <span className={css.serverMessageText}>
                       {settled.stage !== undefined && (
                         <span className={css.serverProbeFailStage}>{t(PROBE_FAILURE_KEYS[settled.stage])}：</span>
                       )}
                       {settled.message}
                     </span>
-                  </button>
+                  </p>
                 )}
-                {settled !== null && settled.state === 'online' && (
+                {record.role === 'compute' && settled !== null && settled.state === 'online' && (
                   settled.gpus.length === 0 ? (
                     <p className={css.hint}>{t('servers.noGpus')}</p>
                   ) : (
@@ -427,6 +438,7 @@ export function ServersView({
                     </div>
                   )
                 )}
+                </div>
                 <div className={css.serverActions}>
                   <button
                     type="button"

@@ -10,6 +10,7 @@
  * @module dsh-mimir/src/service
  */
 
+import { SharedSshTransport } from './services/ssh-transport.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import type { ResearchWikiDomain } from './store.ts'
@@ -234,7 +235,7 @@ export interface ResearchServiceConfig {
  */
 export class ResearchService extends TypertRemoteService {
   /** Read-only injection (workspaceDir/domain/latex/backup from the config). */
-  private readonly deps: ResearchServiceConfig
+  private readonly deps: ResearchServiceConfig & { sshTransport: SharedSshTransport }
   /** The only mutable instance state (compileStatus / id counters). */
   private readonly state: ServiceState
 
@@ -248,6 +249,7 @@ export class ResearchService extends TypertRemoteService {
       throw new TypeError('research: workspaceDir must be a non-empty absolute path')
     }
     this.deps = {
+      sshTransport: new SharedSshTransport(),
       workspaceDir: config.workspaceDir,
       domain: config.domain,
       latex: config.latex,
@@ -280,6 +282,7 @@ export class ResearchService extends TypertRemoteService {
     ctx.fiber.effect(() => () => {
       abortLongTasks(this.state)
       void server.stopOwnedJobs(this.state)
+      void this.deps.sshTransport.close()
     }, 'research.jobsStopOnDispose')
   }
 
@@ -736,12 +739,13 @@ export class ResearchService extends TypertRemoteService {
     experimentId?: string | undefined
     mode?: 'ssh' | 'slurm' | undefined
     parametersJson?: string | undefined
+    sourceDirectory?: string | undefined
   }): Promise<ResearchSubmitJobResult> {
     return server.submitJob(this.deps, this.state, request)
   }
 
   @Remote('listJobs')
-  listJobs(request: { serverId?: string }): Promise<ResearchListJobsResult> {
+  listJobs(request: { serverId?: string; refresh?: boolean }): Promise<ResearchListJobsResult> {
     return server.listJobs(this.deps, this.state, request)
   }
 

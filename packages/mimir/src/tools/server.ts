@@ -76,7 +76,7 @@ function asJson<T>(value: T): JsonValue {
 export function createServerListTool(getResearch: ResearchServiceResolver): ToolDefinition {
   return defineTool({
     name: 'server_list',
-    description: 'List every remembered compute server, most recently updated first. Each entry carries the server id (server_id), host, port, ssh login user (empty for a TCP-only record), tags, and note. Call this before promising or submitting a run so you address a real registered machine.',
+    description: 'List remembered SSH servers, most recently updated first. Each entry carries role (login or compute), host, port, user, remote job directory, tags, and note. Call this before promising or submitting a run.',
     parameters: {
       detail: { type: 'boolean', description: 'Default true; false returns only server ids and names, which keeps the tool call cheap when you only need an id.' },
     },
@@ -102,7 +102,7 @@ export function createServerListTool(getResearch: ResearchServiceResolver): Tool
 export function createServerCheckTool(getResearch: ResearchServiceResolver): ToolDefinition {
   return defineTool({
     name: 'server_check',
-    description: 'Probe one remembered server: a TCP connect (offline settles the view), then — when the record names an ssh login user — a best-effort ssh nvidia-smi GPU readout (its failure empties the GPU table without flipping the state). Returns the settled view: state, per-stage latencies, and the GPU table.',
+    description: 'Manually connect/check one server using shared SSH: Slurm tools on login nodes, nvidia-smi on compute nodes. Opening the panel never probes automatically. Servers without a username use TCP only.',
     parameters: {
       server_id: { type: 'string', required: true, description: 'Id of a remembered server (see server_list).' },
     },
@@ -121,12 +121,13 @@ export function createServerCheckTool(getResearch: ResearchServiceResolver): Too
 export function createServerSubmitJobTool(getResearch: ResearchServiceResolver): ToolDefinition {
   return defineTool({
     name: 'server_submit_job',
-    description: 'Submit a remote SSH command or Slurm batch script. Slurm mode stages job.sh, parameters.json and manifest.json in a unique remote directory, submits with sbatch, and records the scheduler id and configuration hash. Poll server_list_jobs for Slurm status and logs; optional experiment_id receives the settled outcome.',
+    description: 'Submit a remote SSH command or Slurm batch script. Slurm mode stages job.sh, parameters.json and manifest.json in a unique remote directory; optional source_directory is rsynced into an immutable per-job source snapshot before sbatch. The source snapshot hash is included in the configuration hash. Use server_list_jobs with refresh: true for a manual Slurm status/log query; optional experiment_id receives the settled outcome.',
     parameters: {
       server_id: { type: 'string', required: true, description: 'Id of a remembered ssh-capable server (see server_list).' },
       command: { type: 'string', required: true, description: 'SSH command (up to 4000 characters) or Slurm batch script (up to 32768 characters).' },
       mode: { type: 'string', enum: ['ssh', 'slurm'], description: 'Default ssh; slurm treats command as a batch script.' },
       parameters_json: { type: 'string', description: 'Slurm only: JSON object stored as parameters.json in the remote job directory and included in the configuration hash.' },
+      source_directory: { type: 'string', description: 'Optional absolute local directory to rsync to this job’s unique remote source snapshot. Excludes .git, node_modules, .venv, __pycache__, and .DS_Store; the batch script runs from the snapshot directory.' },
       experiment_id: { type: 'string', description: 'Optional wiki experiment record to link and write the settle outcome back to.' },
     },
     output: { schema: { type: 'json' }, render },
@@ -136,6 +137,7 @@ export function createServerSubmitJobTool(getResearch: ResearchServiceResolver):
         command: args.command,
         ...(args.mode === undefined ? {} : { mode: args.mode as 'ssh' | 'slurm' }),
         ...(args.parameters_json === undefined ? {} : { parametersJson: args.parameters_json }),
+        ...(args.source_directory === undefined ? {} : { sourceDirectory: args.source_directory }),
         ...(args.experiment_id === undefined ? {} : { experimentId: args.experiment_id }),
       })))
     },
@@ -150,13 +152,15 @@ export function createServerSubmitJobTool(getResearch: ResearchServiceResolver):
 export function createServerListJobsTool(getResearch: ResearchServiceResolver): ToolDefinition {
   return defineTool({
     name: 'server_list_jobs',
-    description: 'List submitted remote jobs, most recently submitted first, each with its status (queued/running/succeeded/failed/cancelled/interrupted), output tails, and exit code once settled. Optionally filter to one server by server_id. Poll this after server_submit_job to learn when a run settles and whether it succeeded.',
+    description: 'List submitted remote jobs, most recently submitted first, each with its status (queued/running/succeeded/failed/cancelled/interrupted), output tails, and exit code once settled. Optionally filter to one server by server_id. By default reads saved records without SSH. Set refresh to true for a manual scheduler query; do not poll repeatedly.',
     parameters: {
       server_id: { type: 'string', description: 'Only list jobs submitted to this server (see server_list).' },
+      refresh: { type: 'boolean', description: 'Explicitly query Slurm status and logs over SSH. Default false; reads saved records only.' },
     },
     output: { schema: { type: 'json' }, render },
     async execute(args) {
       return asJson(await forward(() => requireService(getResearch).listJobs({
+        ...(args.refresh === undefined ? {} : { refresh: args.refresh }),
         ...(args.server_id === undefined ? {} : { serverId: args.server_id }),
       })))
     },

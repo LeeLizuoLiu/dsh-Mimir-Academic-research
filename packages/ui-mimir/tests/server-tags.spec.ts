@@ -11,7 +11,7 @@ import { collectServerTags, filterServers } from '../src/client/view-common.ts'
 /** One server fixture; only the fields the helpers read differ. */
 function server(id: string, tags: string[]): ServerRecord {
   return {
-    id, name: id, host: '10.0.0.1', port: 22, username: '', note: '',
+    id, name: id, host: '10.0.0.1', port: 22, username: '', role: 'compute', note: '',
     tags, createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
   }
 }

@@ -476,7 +476,7 @@ export interface ResearchPanelInjected {
    * Re-poll the remote-job list (the jobs section's interval while any job
    * is queued/running).
    */
-  refreshJobs: () => void
+  refreshJobs: (refresh?: boolean) => void
   /**
    * Submit one remote command to a server over ssh, optionally linked to an
    * experiment record (its status follows the job's terminal state).
@@ -485,7 +485,7 @@ export interface ResearchPanelInjected {
    * @param experimentId - the experiment to link, when given.
    * @returns null on success, the settled failure otherwise.
    */
-  submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string) => Promise<ResearchFailureView | null>
+  submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string, sourceDirectory?: string) => Promise<ResearchFailureView | null>
   /**
    * Delete one job record, dropping it from the loaded list.
    * @param id - job record id.

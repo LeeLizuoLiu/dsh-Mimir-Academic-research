@@ -129,6 +129,7 @@ describe('researchWikiDomainSpec', () => {
       host: '10.0.0.1',
       port: 22,
       username: 'root',
+      role: 'compute',
       note: '',
       tags: [],
       createdAt: '2026-08-20T00:00:00.000Z',

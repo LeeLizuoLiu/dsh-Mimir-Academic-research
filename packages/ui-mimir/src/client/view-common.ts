@@ -478,7 +478,7 @@ export function collectServerTags(servers: readonly ServerRecord[]): string[] {
 }
 
 /** One stage of the server probe pipeline (mirrors `ServerProbeStage` of dsh-mimir). */
-export type ProbeStage = 'tcp' | 'ssh' | 'gpu'
+export type ProbeStage = 'tcp' | 'ssh' | 'gpu' | 'slurm'
 
 /** End of the TCP stage's time window in ms (the host's TCP probe timeout). */
 export const PROBE_TCP_WINDOW_MS = 4000
@@ -504,6 +504,7 @@ export const PROBE_STAGE_KEYS: Record<ProbeStage, ResearchKey> = {
   tcp: 'servers.probe.stage.tcp',
   ssh: 'servers.probe.stage.ssh',
   gpu: 'servers.probe.stage.gpu',
+  slurm: 'servers.probe.stage.slurm',
 }
 
 /** Locale key of one settled probe's per-stage failure label (the host's `stage`). */
@@ -511,6 +512,7 @@ export const PROBE_FAILURE_KEYS: Record<ProbeStage, ResearchKey> = {
   tcp: 'servers.probe.fail.tcp',
   ssh: 'servers.probe.fail.ssh',
   gpu: 'servers.probe.fail.gpu',
+  slurm: 'servers.probe.fail.slurm',
 }
 
 /** Filter the server list by one active tag; a null selector passes everything. */

@@ -69,6 +69,17 @@ describe('sessionListView', () => {
     expect(view.current).toBeNull()
     expect(view.list).toEqual([{ id: 's1', title: 's1', running: false }])
   })
+
+  it('uses the main-view owner on DSH releases without list.current', () => {
+    const view = sessionListView({
+      ids: ['s1', 's2'],
+      byId: {
+        s1: { displayTitle: 'First', running: false, retainedBy: {} },
+        s2: { displayTitle: 'Second', running: true, retainedBy: { mainView: 1 } },
+      },
+    })
+    expect(view.current).toBe('s2')
+  })
 })
 
 describe('sameSessionListView', () => {

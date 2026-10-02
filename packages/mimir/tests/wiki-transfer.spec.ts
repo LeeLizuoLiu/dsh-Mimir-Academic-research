@@ -82,6 +82,7 @@ const SERVER: ServerRecord = {
   host: '127.0.0.1',
   port: 22,
   username: 'ops',
+  role: 'compute',
   note: '',
   tags: [],
   createdAt: '2026-08-01T00:00:00.000Z',

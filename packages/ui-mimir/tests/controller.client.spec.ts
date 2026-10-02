@@ -1016,6 +1016,24 @@ describe('ResearchController remote jobs', () => {
     expect(lists).toBe(0)
   })
 
+  it('only queries Slurm when a refresh is explicitly requested', async () => {
+    const requests: unknown[] = []
+    const controller = new ResearchController(stubRemote({
+      listJobs: (request) => {
+        requests.push(request)
+        return Promise.resolve(carried<ResearchListJobsResult>({ ok: true, value: { jobs: [] } }))
+      },
+    }))
+    controller.ensureJobs()
+    await settle()
+    controller.refreshJobs()
+    await settle()
+    controller.refreshJobs(true)
+    await settle()
+    expect(requests).toEqual([{ refresh: false }, { refresh: false }, { refresh: true }])
+    controller.dispose()
+  })
+
   it('toasts the terminal flips observed between two polls', async () => {
     let round = 0
     const controller = new ResearchController(stubRemote({

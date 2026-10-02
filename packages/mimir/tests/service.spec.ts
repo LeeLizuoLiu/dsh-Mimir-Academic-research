@@ -287,7 +287,49 @@ describe('ResearchService server CRUD', () => {
 })
 
 describe('ResearchService.checkServer', () => {
-  it('settles an unreachable address as offline with the socket message, stopped at the tcp stage', async () => {
+  it('checks Slurm on login nodes without calling nvidia-smi', async () => {
+    const listener = createServer()
+    await new Promise<void>((resolveListen) => { listener.listen(0, '127.0.0.1', resolveListen) })
+    try {
+      const port = (listener.address() as AddressInfo).port
+      const binDir = await mkdtemp(join(tmpdir(), 'mimir-fake-ssh-login-'))
+      const script = [
+        '#!/bin/bash',
+        'case "$*" in',
+        '  *nvidia-smi*) echo "GPU probe must not run on login nodes" >&2; exit 9 ;;',
+        '  *slurm-fail@*) echo "sbatch unavailable" >&2; exit 1 ;;',
+        '  *sbatch*) exit 0 ;;',
+        '  *) exit 8 ;;',
+        'esac',
+        '',
+      ].join('\n')
+      await writeFile(join(binDir, 'ssh'), script)
+      await chmod(join(binDir, 'ssh'), 0o755)
+      vi.stubEnv('PATH', `${binDir}:${process.env.PATH ?? ''}`)
+      const { service } = await harness()
+      const ready = await service.saveServer({ server: {
+        ...SERVER_INPUT, host: '127.0.0.1', port, role: 'login',
+      } })
+      if (!ready.ok) throw new Error('create failed')
+      const checked = await service.checkServer({ id: ready.value.server.id })
+      if (!checked.ok) throw new Error('check rejected')
+      expect(checked.value).toMatchObject({ state: 'online', stage: 'slurm', message: null, gpus: [] })
+      expect(checked.value.slurmLatencyMs).toBeGreaterThanOrEqual(0)
+
+      const missing = await service.saveServer({ server: {
+        ...SERVER_INPUT, host: '127.0.0.1', port, role: 'login', username: 'slurm-fail',
+      } })
+      if (!missing.ok) throw new Error('create failed')
+      const failed = await service.checkServer({ id: missing.value.server.id })
+      if (!failed.ok) throw new Error('check rejected')
+      expect(failed.value).toMatchObject({ state: 'online', stage: 'slurm', gpus: [] })
+      expect(failed.value.message).toContain('sbatch unavailable')
+    } finally {
+      await new Promise<void>((resolveClose) => { listener.close(() => { resolveClose() }) })
+    }
+  })
+
+  it('settles an unreachable SSH address as offline without an unauthenticated TCP probe', async () => {
     const { service } = await harness()
     const created = await service.saveServer({
       server: { ...SERVER_INPUT, host: '127.0.0.1', port: 19999 },
@@ -299,9 +341,9 @@ describe('ResearchService.checkServer', () => {
     expect(checked.value.latencyMs).toBeNull()
     expect(checked.value.gpus).toEqual([])
     expect(checked.value.message).toBeTruthy()
-    expect(checked.value.stage).toBe('tcp')
+    expect(checked.value.stage).toBe('ssh')
     expect(checked.value.tcpLatencyMs).toBeUndefined()
-    expect(checked.value.gpuLatencyMs).toBeUndefined()
+    expect(checked.value.gpuLatencyMs).toBeGreaterThanOrEqual(0)
     expect(Date.parse(checked.value.checkedAt)).not.toBeNaN()
   })
 
@@ -335,7 +377,7 @@ describe('ResearchService.checkServer', () => {
     }
   })
 
-  it('keeps a reachable server online when the ssh session itself fails, stopped at the ssh stage', async () => {
+  it('reports a rejected SSH session offline instead of claiming Online', async () => {
     const listener = createServer((socket) => { socket.destroy() })
     await new Promise<void>((resolveListen) => { listener.listen(0, '127.0.0.1', resolveListen) })
     try {
@@ -350,11 +392,11 @@ describe('ResearchService.checkServer', () => {
       if (!created.ok) throw new Error('create failed')
       const checked = await service.checkServer({ id: created.value.server.id })
       if (!checked.ok) throw new Error('check rejected')
-      expect(checked.value.state).toBe('online')
+      expect(checked.value.state).toBe('offline')
       expect(checked.value.gpus).toEqual([])
       expect(checked.value.message).toContain('gpu probe failed')
       expect(checked.value.stage).toBe('ssh')
-      expect(checked.value.tcpLatencyMs).toBeGreaterThanOrEqual(0)
+      expect(checked.value.tcpLatencyMs).toBeUndefined()
       expect(checked.value.gpuLatencyMs).toBeGreaterThanOrEqual(0)
     } finally {
       await new Promise<void>((resolveClose) => { listener.close(() => { resolveClose() }) })
@@ -380,7 +422,7 @@ describe('ResearchService.checkServer', () => {
       expect(checked.value.gpus).toEqual([])
       expect(checked.value.message).toContain('gpu probe failed')
       expect(checked.value.stage).toBe('gpu')
-      expect(checked.value.tcpLatencyMs).toBeGreaterThanOrEqual(0)
+      expect(checked.value.tcpLatencyMs).toBeUndefined()
       expect(checked.value.gpuLatencyMs).toBeGreaterThanOrEqual(0)
     } finally {
       await new Promise<void>((resolveClose) => { listener.close(() => { resolveClose() }) })
@@ -406,7 +448,7 @@ describe('ResearchService.checkServer', () => {
       expect(checked.value.gpus).toEqual([
         { name: 'Fake GPU 0', utilizationPct: 37, memoryUsedMb: 2048, memoryTotalMb: 24576 },
       ])
-      expect(checked.value.tcpLatencyMs).toBeGreaterThanOrEqual(0)
+      expect(checked.value.tcpLatencyMs).toBeUndefined()
       expect(checked.value.gpuLatencyMs).toBeGreaterThanOrEqual(0)
     } finally {
       await new Promise<void>((resolveClose) => { listener.close(() => { resolveClose() }) })

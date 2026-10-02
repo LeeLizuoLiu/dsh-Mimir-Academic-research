@@ -310,8 +310,9 @@ export interface ResearchRemote {
     experimentId?: string | undefined
     mode?: 'ssh' | 'slurm' | undefined
     parametersJson?: string | undefined
+    sourceDirectory?: string | undefined
   }) => Promise<RemoteResult<ResearchSubmitJobResult>>
-  listJobs: (request: { serverId?: string }) => Promise<RemoteResult<ResearchListJobsResult>>
+  listJobs: (request: { serverId?: string; refresh?: boolean }) => Promise<RemoteResult<ResearchListJobsResult>>
   deleteJob: (request: { id: string }) => Promise<RemoteResult<ResearchDeleteJobResult>>
   getBibliography: (request: { projectId: string; dir?: string | undefined }) => Promise<RemoteResult<ResearchBibliographyResult>>
   saveBibliography: (request: {
@@ -3893,9 +3894,9 @@ export class ResearchController implements HostObservable<ResearchView> {
    * active, and the post-submit repaint). A poll already in flight is left
    * alone; a ready list stays ready while the refresh runs.
    */
-  refreshJobs(): void {
+  refreshJobs(refresh = false): void {
     if (this.jobsPromise !== null) return
-    this.jobsPromise = this.loadJobs().finally(() => { this.jobsPromise = null })
+    this.jobsPromise = this.loadJobs(refresh).finally(() => { this.jobsPromise = null })
   }
 
   /**
@@ -3906,9 +3907,9 @@ export class ResearchController implements HostObservable<ResearchView> {
    * @param experimentId - the experiment to link, when given.
    * @returns null on success, the settled failure otherwise.
    */
-  async submitJob(serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string): Promise<ResearchFailureView | null> {
+  async submitJob(serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string, sourceDirectory?: string): Promise<ResearchFailureView | null> {
     try {
-      const carried = await this.remote.submitJob({ serverId, command, experimentId, mode, parametersJson })
+      const carried = await this.remote.submitJob({ serverId, command, experimentId, mode, parametersJson, sourceDirectory })
       if (this.disposed) return null
       if (!carried.ok) return failureOf(carried.error.code, carried.error.message)
       const result = carried.value
@@ -3954,12 +3955,12 @@ export class ResearchController implements HostObservable<ResearchView> {
   }
 
   /** Fetch the job list and publish it, toasting terminal flips observed between polls. */
-  private async loadJobs(): Promise<void> {
+  private async loadJobs(refresh = false): Promise<void> {
     if (this.view.jobs.status === 'cold') {
       this.publish({ jobs: Object.freeze({ ...this.view.jobs, status: 'loading', failure: null }) })
     }
     try {
-      const carried = await this.remote.listJobs({})
+      const carried = await this.remote.listJobs({ refresh })
       if (this.disposed) return
       if (!carried.ok) {
         this.publish({

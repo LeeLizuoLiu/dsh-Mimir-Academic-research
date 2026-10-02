@@ -56,8 +56,13 @@ export interface ResearchSessionListView {
 /** The slice of the dsh session-list snapshot the projection reads. */
 export interface SessionListSource {
   readonly ids: readonly string[]
-  readonly byId: Readonly<Record<string, { readonly displayTitle: string; readonly running: boolean } | undefined>>
-  readonly current: string | undefined
+  readonly byId: Readonly<Record<string, {
+    readonly displayTitle: string
+    readonly running: boolean
+    readonly retainedBy?: Readonly<{ readonly mainView?: number }>
+  } | undefined>>
+  /** Present in older DSH releases; current DSH marks the main-view owner. */
+  readonly current?: string | undefined
 }
 
 /**
@@ -67,7 +72,7 @@ export interface SessionListSource {
  */
 export function sessionListView(state: SessionListSource): ResearchSessionListView {
   return Object.freeze({
-    current: state.current ?? null,
+    current: state.current ?? state.ids.find(id => (state.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? null,
     list: Object.freeze(state.ids.map(id => Object.freeze({
       id,
       title: state.byId[id]?.displayTitle ?? id,

@@ -126,6 +126,10 @@ export const serverRecord = z.object({
   port: z.number().int().min(1).max(65535),
   /** SSH login user; an empty string downgrades probes to TCP-only. */
   username: z.string(),
+  // Existing server records predate roles and retain their GPU-box behavior.
+  role: z.enum(['login', 'compute']).default('compute'),
+  // Existing server records use the default at submission time.
+  remoteJobRoot: z.string().optional(),
   note: z.string(),
   // Added WITHOUT a version bump: `.default([])` fills the field when a
   // stored record predates it, so existing v2 JSON stores keep loading.
@@ -140,6 +144,9 @@ export const jobRecord = z.object({
   mode: z.literal('slurm').optional(),
   slurmJobId: z.string().regex(/^\d+$/).optional(),
   remoteDir: z.string().optional(),
+  remoteSourceDir: z.string().optional(),
+  sourceSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  sourceFileCount: z.number().int().nonnegative().optional(),
   configHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   statusNote: z.string().optional(),
   serverId: z.string(),

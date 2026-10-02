@@ -57,7 +57,7 @@ export {
 const NS = 'research'
 
 /** Required services: the slot registry, the Remote carrier, the sessions domain, the copy, and the theme preference. `remote.research` is NOT listed: this module mounts that namespace itself, and an inject entry would make the loader wait for a service that only this module can create. */
-export const inject = ['slots', 'remote', 'sessions', 'locale', 'theme']
+export const inject = ['slots', 'remote', 'sessions', 'uiWorkspace', 'locale', 'theme']
 
 /**
  * Upload one figure file through the host's upload route. The route answers
@@ -226,8 +226,8 @@ function panelApply(ctx: ClientContext): void {
     sentCopy: ResearchKey,
     failedCopy: ResearchKey,
   ): Promise<void> => {
-    const current = sessions.list.getSnapshot().current
-    const binding = current === undefined ? undefined : sessions.binding(current)
+    const current = sessionListView(sessions.list.getSnapshot()).current
+    const binding = current === null ? undefined : sessions.binding(current as Parameters<ISessions['binding']>[0])
     if (binding === undefined) {
       controller.notify('error', 'toast.fixNoSession')
       return
@@ -280,7 +280,13 @@ function panelApply(ctx: ClientContext): void {
       deleteProject: (projectId) => controller.deleteProject(projectId),
       // The session switcher: the current session is the delivery target of
       // every "… with AI" verb; the wiki itself is shared across sessions.
-      selectSession: (sessionId) => { sessions.open(sessionId as Parameters<ISessions['open']>[0]) },
+      selectSession: (sessionId) => {
+        // DSH 0.1.6 moved main-view navigation out of the Session Controller.
+        // Use the same service as the official Workspace sidebar so the
+        // selected chat and Mimir's AI delivery target stay in sync.
+        const navigation = ctx as ClientContext & { uiWorkspace: { openSession: (id: string) => void } }
+        navigation.uiWorkspace.openSession(sessionId)
+      },
       compile: (projectId) => { void controller.compile(projectId) },
       // The per-issue "fix with AI" button.
       requestCompileFix: prompt => sendPromptToCurrentSession(prompt, 'toast.fixSent', 'toast.fixSendFailed'),
@@ -370,8 +376,8 @@ function panelApply(ctx: ClientContext): void {
       checkServer: (id) => controller.checkServer(id),
       checkAllServers: () => { void controller.checkAllServers() },
       ensureJobs: () => { controller.ensureJobs() },
-      refreshJobs: () => { controller.refreshJobs() },
-      submitJob: (serverId, command, experimentId, mode, parametersJson) => controller.submitJob(serverId, command, experimentId, mode, parametersJson),
+      refreshJobs: (refresh) => { controller.refreshJobs(refresh) },
+      submitJob: (serverId, command, experimentId, mode, parametersJson, sourceDirectory) => controller.submitJob(serverId, command, experimentId, mode, parametersJson, sourceDirectory),
       deleteJob: (id) => controller.deleteJob(id),
       ensureBibliography: (projectId) => { controller.ensureBibliography(projectId) },
       reloadBibliography: () => { controller.reloadBibliography() },

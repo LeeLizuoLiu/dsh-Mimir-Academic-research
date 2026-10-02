@@ -232,7 +232,13 @@ export interface JobRecord {
   readonly slurmJobId?: string | undefined
   /** Per-submission directory on the remote host. */
   readonly remoteDir?: string | undefined
-  /** SHA-256 of the canonical script and parameter JSON. */
+  /** Immutable source snapshot directory within this submission, when uploaded. */
+  readonly remoteSourceDir?: string | undefined
+  /** SHA-256 of the synchronized source tree, when uploaded. */
+  readonly sourceSha256?: string | undefined
+  /** Number of files included in the source snapshot. */
+  readonly sourceFileCount?: number | undefined
+  /** SHA-256 of the canonical script, parameter JSON, and optional source tree. */
   readonly configHash?: string | undefined
   /** A recoverable scheduler query or submission diagnostic. */
   readonly statusNote?: string | undefined
@@ -813,7 +819,13 @@ export interface MeetingInclude {
   readonly papers: boolean
 }
 
-/** One remembered compute server (a GPU box the experiments run on). */
+/** A login node submits work to Slurm; a compute node can expose local GPUs. */
+export type ServerRole = 'login' | 'compute'
+
+/** Home-relative location for new Slurm submissions on a login node. */
+export const DEFAULT_REMOTE_JOB_ROOT = 'scratch/.mimir/jobs'
+
+/** One remembered SSH server. */
 export interface ServerRecord {
   readonly id: string
   readonly name: string
@@ -821,6 +833,9 @@ export interface ServerRecord {
   readonly port: number
   /** SSH login user; an empty string downgrades probes to TCP-only. */
   readonly username: string
+  readonly role: ServerRole
+  /** Home-relative or absolute directory on the remote login node for new jobs. */
+  readonly remoteJobRoot?: string | undefined
   /** Free-form operator note. */
   readonly note: string
   /** Operator-assigned grouping labels. */
@@ -838,6 +853,10 @@ export interface ServerInput {
   readonly host: string
   readonly port: number
   readonly username: string
+  /** Defaults to `compute` for older callers. */
+  readonly role?: ServerRole | undefined
+  /** Home-relative or absolute directory on the remote login node for new jobs. */
+  readonly remoteJobRoot?: string | undefined
   readonly note: string
   /** Replacement tag list; omitted keeps the existing tags on update. */
   readonly tags?: string[] | undefined
@@ -852,8 +871,8 @@ export interface ServerGpuView {
   readonly memoryTotalMb: number
 }
 
-/** One stage of the `checkServer` probe pipeline: TCP connect, ssh session, GPU readout. */
-export type ServerProbeStage = 'tcp' | 'ssh' | 'gpu'
+/** One stage of the `checkServer` probe pipeline. */
+export type ServerProbeStage = 'tcp' | 'ssh' | 'gpu' | 'slurm'
 
 /** The settled outcome of one `checkServer` probe. */
 export interface ServerStatusView {
@@ -876,6 +895,8 @@ export interface ServerStatusView {
   readonly tcpLatencyMs?: number | undefined
   /** Wall-clock ms of the ssh GPU readout; absent when it never ran. */
   readonly gpuLatencyMs?: number | undefined
+  /** Wall-clock ms of the login node's Slurm command check. */
+  readonly slurmLatencyMs?: number | undefined
 }
 
 /** `listServers` result: every remembered server, most recently updated first. */

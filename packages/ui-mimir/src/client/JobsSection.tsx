@@ -3,9 +3,9 @@
  * command input, and an optional experiment link from the selected project's
  * loaded experiments) above the job table — status pill, command, linked
  * server, submit time, expandable stdout/stderr tails, delete. While any job
- * is queued/running the section polls the Host every
+ * is a locally owned SSH job, the section polls saved Host state every
  * {@link JOB_POLL_INTERVAL_MS}; a terminal flip observed between polls
- * surfaces as a toast (controller-side).
+ * surfaces as a toast (controller-side). Slurm queries require a manual refresh.
  * @module dsh-client-ui-mimir/client/JobsSection
  */
 
@@ -19,7 +19,6 @@ import css from './ResearchPanel.module.css'
 
 /** Poll cadence while any job is queued/running. */
 const JOB_POLL_INTERVAL_MS = 2000
-const SLURM_POLL_INTERVAL_MS = 15_000
 
 /** Whether one job still has a status flip coming (the polling condition). */
 function isActive(job: JobRecord): boolean {
@@ -39,8 +38,8 @@ export function JobsSection({
   readonly servers: ResearchServersView
   readonly experiments: ResearchProjectSlice<readonly ExperimentRecord[]> | null
   readonly ensureJobs: () => void
-  readonly refreshJobs: () => void
-  readonly submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string) => Promise<ResearchFailureView | null>
+  readonly refreshJobs: (refresh?: boolean) => void
+  readonly submitJob: (serverId: string, command: string, experimentId?: string, mode?: 'ssh' | 'slurm', parametersJson?: string, sourceDirectory?: string) => Promise<ResearchFailureView | null>
   readonly deleteJob: (id: string) => Promise<ResearchFailureView | null>
   readonly t: ResearchT
 }) {
@@ -49,18 +48,17 @@ export function JobsSection({
   const [command, setCommand] = useState('')
   const [mode, setMode] = useState<'ssh' | 'slurm'>('ssh')
   const [parametersJson, setParametersJson] = useState('{}')
+  const [sourceDirectory, setSourceDirectory] = useState('')
   const [formError, setFormError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [openOutput, setOpenOutput] = useState<Record<string, boolean>>({})
 
   useEffect(() => { ensureJobs() }, [ensureJobs])
-  // Poll only while a status flip is still coming; a settled list is static.
+  // Only repaint locally owned SSH jobs automatically. Slurm queries are explicit.
   useEffect(() => {
-    if (jobs.status !== 'ready' || !jobs.list.some(isActive)) return
-    const interval = jobs.list.some(job => isActive(job) && job.mode !== 'slurm')
-      ? JOB_POLL_INTERVAL_MS : SLURM_POLL_INTERVAL_MS
-    const timer = setInterval(refreshJobs, interval)
+    if (jobs.status !== 'ready' || !jobs.list.some(job => isActive(job) && job.mode !== 'slurm')) return
+    const timer = setInterval(() => { refreshJobs(false) }, JOB_POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
   }, [jobs, refreshJobs])
 
@@ -79,7 +77,8 @@ export function JobsSection({
     setSubmitting(true)
     setFormError(null)
     void submitJob(selectedServer, command.trim(), experimentId === '' ? undefined : experimentId,
-      mode, mode === 'slurm' ? parametersJson : undefined)
+      mode, mode === 'slurm' ? parametersJson : undefined,
+      mode === 'slurm' && sourceDirectory.trim() !== '' ? sourceDirectory.trim() : undefined)
       .then((failure) => {
         if (failure !== null) {
           setFormError(failure.message)
@@ -100,6 +99,10 @@ export function JobsSection({
   return (
     <div className={css.jobsSection}>
       <h3 className={css.sectionTitle}>{t('jobs.title')}</h3>
+      <p className={css.hint}>{t('jobs.manualRefreshHelp')}</p>
+      <button type="button" className={css.btn} onClick={() => { refreshJobs(true) }}>
+        {t('jobs.refreshStatus')}
+      </button>
       <div className={css.jobForm}>
         <label className={css.field}>
           <span className={css.fieldLabel}>{t('jobs.mode')}</span>
@@ -121,7 +124,23 @@ export function JobsSection({
             ))}
           </select>
         </label>
-        <label className={css.field} data-wide>
+        {experimentOptions.length > 0 && (
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('jobs.experiment')}</span>
+            <select
+              className={css.serverSelect}
+              value={experimentId}
+              aria-label={t('jobs.experiment')}
+              onChange={(event) => { setExperimentId(event.target.value) }}
+            >
+              <option value="">{t('jobs.noExperiment')}</option>
+              {experimentOptions.map(record => (
+                <option key={record.id} value={record.id}>{record.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className={css.field} data-wide data-script={mode === 'slurm' || undefined}>
           <span className={css.fieldLabel}>{mode === 'slurm' ? t('jobs.script') : t('jobs.command')}</span>
           {mode === 'slurm' ? <textarea
             className={css.input}
@@ -140,27 +159,17 @@ export function JobsSection({
           />}
         </label>
         {mode === 'slurm' && <label className={css.field} data-wide>
+          <span className={css.fieldLabel}>{t('jobs.sourceDirectory')}</span>
+          <input className={css.input} value={sourceDirectory} placeholder={t('jobs.sourceDirectoryPlaceholder')}
+            onChange={event => { setSourceDirectory(event.target.value) }} />
+          <small>{t('jobs.sourceDirectoryHelp')}</small>
+        </label>}
+        {mode === 'slurm' && <label className={css.field} data-wide>
           <span className={css.fieldLabel}>{t('jobs.parameters')}</span>
           <textarea className={css.input} rows={3} value={parametersJson}
             onChange={event => { setParametersJson(event.target.value) }} />
           <small>{t('jobs.parametersHelp')}</small>
         </label>}
-        {experimentOptions.length > 0 && (
-          <label className={css.field}>
-            <span className={css.fieldLabel}>{t('jobs.experiment')}</span>
-            <select
-              className={css.serverSelect}
-              value={experimentId}
-              aria-label={t('jobs.experiment')}
-              onChange={(event) => { setExperimentId(event.target.value) }}
-            >
-              <option value="">{t('jobs.noExperiment')}</option>
-              {experimentOptions.map(record => (
-                <option key={record.id} value={record.id}>{record.name}</option>
-              ))}
-            </select>
-          </label>
-        )}
         <button
           type="button"
           className={css.btnPrimary}
@@ -177,7 +186,7 @@ export function JobsSection({
       ) : jobs.status === 'error' ? (
         <p className={css.failure} role="alert">
           {t('error.jobs')}：{failureCopy(t, jobs.failure)}
-          <button type="button" className={css.btn} onClick={refreshJobs}>
+          <button type="button" className={css.btn} onClick={() => { refreshJobs(false) }}>
             {t('error.retry')}
           </button>
         </p>

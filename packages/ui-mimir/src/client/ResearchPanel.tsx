@@ -728,6 +728,7 @@ export function ResearchPanel({
               <option key={session.id} value={session.id}>{session.title}</option>
             ))}
           </select>
+          <span className={css.sessionHint}>{t('session.hint')}</span>
         </div>
         <p className={css.sideFoot}>{t('shortcuts.hint')}</p>
       </aside>
